@@ -194,9 +194,12 @@ class Indexer {
     for (const { tx } of parsed) {
       if (tx.logs && tx.logs.length > 0) {
         for (const log of tx.logs) {
+          const rawIndex = log.logIndex ?? log.index;
+          const logIndex = rawIndex != null ? Number(rawIndex) : null;
+          if (logIndex == null) continue;
           allLogs.push({
             txHash: tx.hash, blockNumber: tx.blockNumber,
-            blockHash: tx.blockHash, index: log.index,
+            blockHash: tx.blockHash, index: logIndex,
             address: log.address, data: JSON.stringify(log),
           });
         }

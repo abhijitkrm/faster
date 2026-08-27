@@ -24,8 +24,13 @@ const shortAddr = (a) => a ? a.slice(0, 6) + '\u2026' + a.slice(-4) : 'Contract'
 const shortHash = (h) => h ? h.slice(0, 8) + '\u2026' + h.slice(-6) : '';
 const fmtVal    = (v) => { try { return (Number(BigInt(v)) / 1e18).toFixed(4); } catch { return '0.0000'; } };
 
+const ROWS = 20;
+
 export default function Home() {
   const { blocks, txs, newHashes } = useWS();
+
+  const latestBlocks = blocks.slice(0, ROWS);
+  const latestTxs    = txs.slice(0, ROWS);
 
   return (
     <div className="home-grid">
@@ -35,7 +40,7 @@ export default function Home() {
           <span className="panel-title">Latest Blocks</span>
           <Link to="/blocks" className="panel-link">View all &rarr;</Link>
         </div>
-        {blocks.length === 0
+        {latestBlocks.length === 0
           ? <div className="empty">No blocks yet&hellip;</div>
           : (
             <table className="dt">
@@ -45,7 +50,7 @@ export default function Home() {
                 <th style={{textAlign:'right'}}>Age</th>
               </tr></thead>
               <tbody>
-                {blocks.map(b => (
+                {latestBlocks.map(b => (
                   <tr key={b.hash} className={newHashes.has(b.hash) ? 'is-new' : ''}>
                     <td><Link to={`/blocks/${b.number}`} className="num-link">#{Number(b.number).toLocaleString()}</Link></td>
                     <td>
@@ -69,7 +74,7 @@ export default function Home() {
           <span className="panel-title">Latest Transactions</span>
           <Link to="/transactions" className="panel-link">View all &rarr;</Link>
         </div>
-        {txs.length === 0
+        {latestTxs.length === 0
           ? <div className="empty">No transactions yet&hellip;</div>
           : (
             <table className="dt">
@@ -79,7 +84,7 @@ export default function Home() {
                 <th style={{textAlign:'right'}}>Status</th>
               </tr></thead>
               <tbody>
-                {txs.map(tx => (
+                {latestTxs.map(tx => (
                   <tr key={tx.hash}>
                     <td style={{fontSize:11}}>
                       <Link to={`/tx/${tx.hash}`} className="hash-link">

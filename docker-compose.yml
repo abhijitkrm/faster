@@ -136,33 +136,10 @@ services:
     networks:
       - explorer-network
 
-  # Prometheus Monitoring (Minimal)
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: explorer-prometheus
-    ports:
-      - "4090:9090"
-    volumes:
-      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus-data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--storage.tsdb.retention.time=7d'
-    depends_on:
-      - api
-      - block-listener
-      - indexer
-    restart: unless-stopped
-    networks:
-      - explorer-network
-
 volumes:
   postgres-data:
     driver: local
   redis-data:
-    driver: local
-  prometheus-data:
     driver: local
 
 networks:

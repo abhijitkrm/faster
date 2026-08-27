@@ -8,6 +8,90 @@ const fmtEth   = (wei) => { try { return (Number(BigInt(wei)) / 1e18).toFixed(6)
 const fmtGwei  = (wei) => { try { return (Number(BigInt(wei)) / 1e9).toFixed(2) + ' Gwei'; } catch { return '—'; } };
 const shortAddr = (a) => a ? a.slice(0, 6) + '…' + a.slice(-4) : 'Contract';
 
+const EVENT_NAMES = {
+  '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef': 'Transfer',
+  '0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925': 'Approval',
+};
+
+const parseTopicAddress = (t) => {
+  if (t.length === 66 && t.startsWith('0x000000000000000000000000')) {
+    return '0x' + t.slice(26);
+  }
+  return null;
+};
+
+const LogEntry = ({ log }) => {
+  let parsed = null;
+  try { parsed = JSON.parse(log.data); } catch {}
+
+  const address = log.address || parsed?.address;
+  const topics = (parsed?.topics || log.topics || []);
+  const data = parsed?.data ?? log.data;
+  const eventSig = topics[0]?.toLowerCase() || '';
+  const eventName = EVENT_NAMES[eventSig];
+
+  const topicLabel = (idx) => {
+    if (idx === 0) return 'signature';
+    if (eventName === 'Transfer') return idx === 1 ? 'from' : idx === 2 ? 'to' : `topic[${idx}]`;
+    if (eventName === 'Approval') return idx === 1 ? 'owner' : idx === 2 ? 'spender' : `topic[${idx}]`;
+    return `topic[${idx}]`;
+  };
+
+  const decodedAmount = () => {
+    if (eventName !== 'Transfer' || !data || data.length < 66) return null;
+    try { return BigInt(data).toString(); } catch { return null; }
+  };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+        <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.1em',
+                       color: 'var(--text-3)', background: 'var(--surface-2)',
+                       padding: '2px 8px', borderRadius: 4 }}>LOG #{log.log_index}</span>
+        {eventName && (
+          <span style={{ fontSize: 9, fontWeight: 700, color: 'var(--purple)', letterSpacing: '.05em' }}>
+            {eventName.toUpperCase()}
+          </span>
+        )}
+        <Link to={`/address/${address}`} className="addr-link" style={{ fontFamily: 'monospace', fontSize: 11 }}>
+          {shortAddr(address)} ({address})
+        </Link>
+      </div>
+
+      {topics.length > 0 && (
+        <div style={{ marginBottom: 8 }}>
+          {topics.map((t, ti) => {
+            const addr = parseTopicAddress(t);
+            return (
+              <div key={ti} style={{ fontSize: 10, fontFamily: 'monospace', marginBottom: 2 }}>
+                <span style={{ color: 'var(--text-3)', marginRight: 8 }}>{topicLabel(ti)}</span>
+                {addr
+                  ? <Link to={`/address/${addr}`} className="addr-link" style={{ fontSize: 10 }}>
+                      {shortAddr(addr)} ({addr})
+                    </Link>
+                  : <span style={{ color: ti === 0 ? 'var(--purple)' : 'var(--text-2)', wordBreak: 'break-all' }}>{t}</span>
+                }
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {data && data !== '0x' && (
+        <div style={{ fontSize: 10, color: 'var(--text-3)', wordBreak: 'break-all', marginBottom: 4 }}>
+          <span style={{ color: 'var(--text-3)', marginRight: 8 }}>data</span>
+          <span style={{ fontFamily: 'monospace', color: 'var(--text-2)' }}>{data}</span>
+          {decodedAmount() && (
+            <span style={{ marginLeft: 10, color: 'var(--green)' }}>
+              ({decodedAmount()} units)
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const fmtTs = (ts) => {
   if (!ts) return '—';
   return new Date(parseInt(ts) * 1000).toLocaleString();
@@ -164,34 +248,7 @@ export default function TxDetail() {
                 padding: '14px 20px',
                 borderBottom: i < tx.logs.length - 1 ? '1px solid var(--border)' : 'none',
               }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-                  <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.1em',
-                                 color: 'var(--text-3)', background: 'var(--surface-2)',
-                                 padding: '2px 8px', borderRadius: 4 }}>LOG #{log.log_index}</span>
-                  <Link to={`/address/${log.address}`} className="addr-link"
-                    style={{ fontFamily: 'monospace', fontSize: 11 }}>
-                    {shortAddr(log.address)} ({log.address})
-                  </Link>
-                </div>
-                {log.topics && log.topics.length > 0 && (
-                  <div style={{ marginBottom: 6 }}>
-                    {log.topics.map((t, ti) => (
-                      <div key={ti} style={{ fontSize: 10, fontFamily: 'monospace',
-                                             color: ti === 0 ? 'var(--purple)' : 'var(--text-3)',
-                                             marginBottom: 2 }}>
-                        <span style={{ color: 'var(--text-3)', marginRight: 8 }}>
-                          {ti === 0 ? 'topic[sig]' : `topic[${ti}]`}
-                        </span>{t}
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {log.data && log.data !== '0x' && (
-                  <div style={{ fontSize: 10, fontFamily: 'monospace', color: 'var(--text-3)',
-                                wordBreak: 'break-all' }}>
-                    <span style={{ marginRight: 8 }}>data</span>{log.data}
-                  </div>
-                )}
+                <LogEntry log={log} />
               </div>
             ))}
           </div>
