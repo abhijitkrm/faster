@@ -1,6 +1,6 @@
 # Faster — Real-Time EVM Block Explorer
 
-A high-performance, real-time EVM block explorer built on Docker using JS. Designed for high-throughput chains with sub-second block times — streams blocks and transactions live to the browser via WebSocket with no page refresh required.
+A high-performance, real-time EVM block explorer built on Docker using **Go** and React. Designed for high-throughput chains with sub-second block times — streams blocks and transactions live to the browser via WebSocket with no page refresh required.
 
 > Works with any EVM-compatible chain (Ethereum, L2s, custom EVM L1s). Tested at 400ms block times with 50+ transactions per block.
 
@@ -9,12 +9,13 @@ A high-performance, real-time EVM block explorer built on Docker using JS. Desig
 ## Features
 
 - **Real-time streaming** — blocks and transactions pushed to the UI as they land on chain
-- **Parallel block ingestion** — fetches 20 blocks simultaneously using raw JSON-RPC (`eth_getBlockByNumber` + `eth_getBlockReceipts` in one round trip per block)
-- **Full data pipeline** — block listener → Redis Streams → indexer → PostgreSQL → API → WebSocket → frontend
+- **Parallel block ingestion in Go** — `fasterindexer` uses goroutines and an RPS rate limiter to fetch blocks + receipts from any EVM RPC
+- **Full data pipeline** — `fasterindexer` → Redis Streams → PostgreSQL → `api-go` → WebSocket → frontend
+- **Go-based API gateway** — `api-go` serves REST and uses goroutines for low-latency WebSocket broadcasting
 - **Address activity tracking** — transaction counts and history per address
 - **Instantaneous TPS** — calculated from latest block tx count ÷ recent avg block time
 - **Terminal dark UI** — built with React + Vite, zero external UI dependencies
-- **Resumable indexing** — listener saves checkpoint to Redis, picks up where it left off on restart
+- **Resumable indexing** — `fasterindexer` saves checkpoint to Redis, picks up where it left off on restart
 - **Health endpoints** on every service
 
 ## Prerequisites
@@ -35,10 +36,10 @@ cp .env.example .env
 # Edit .env — set RPC_URL to your chain's HTTP RPC endpoint
 
 # 3. Start everything
-docker-compose up -d
+docker compose up -d
 
 # 4. Open the explorer
-open http://localhost:3001
+open http://localhost:4001
 ```
 
 ## Configuration
@@ -55,7 +56,7 @@ DB_PASSWORD=change_me_in_production
 DB_NAME=explorer
 
 # API base URL (used by the frontend)
-VITE_API_URL=http://localhost:3000
+VITE_API_URL=http://localhost:4000
 ```
 
 > **Note:** `eth_getBlockReceipts` must be supported by your RPC node for receipt data (gas used, status, logs). Most modern EVM nodes support it. If not, receipts will be `null` but blocks and transactions will still index.
@@ -64,9 +65,8 @@ VITE_API_URL=http://localhost:3000
 
 ```
 ├── services/
-│   ├── block-listener/     # Polls RPC, writes blocks + txs to Redis Streams
-│   ├── indexer/            # Reads Redis Streams, writes to PostgreSQL
-│   ├── api/                # REST + WebSocket API
+│   ├── fasterindexer/      # Go — polls RPC, indexes blocks/txs/logs into Redis + PostgreSQL
+│   ├── api-go/             # Go — REST + WebSocket API
 │   └── frontend/           # React 18 + Vite UI
 ├── database/
 │   └── init-db.sql         # Schema (auto-applied on first start)
@@ -79,10 +79,10 @@ VITE_API_URL=http://localhost:3000
 
 | Component | Technology |
 |-----------|-----------|
-| Block Listener | Node.js, raw JSON-RPC via `fetch` |
+| Indexer | Go (`fasterindexer`), raw JSON-RPC, Redis Streams, PostgreSQL |
 | Message Queue | Redis Streams |
 | Database | PostgreSQL 15 |
-| API | Express.js + WebSocket |
+| API | Go (`api-go`) + Gorilla WebSocket |
 | Frontend | React 18 + Vite |
 | Container | Docker + Docker Compose |
 
@@ -102,7 +102,7 @@ GET  /health                          # Health check
 
 ### WebSocket
 
-Connect to `ws://localhost:3000` — the server pushes events as they are indexed:
+Connect to `ws://localhost:4000` — the server pushes events as they are indexed:
 
 ```javascript
 const ws = new WebSocket('ws://localhost:3000');
@@ -119,10 +119,9 @@ ws.onmessage = ({ data }) => {
 
 | Service | Port | Purpose |
 |---------|------|---------|
-| Frontend | 3001 | Web UI |
-| API | 3000 | REST + WebSocket |
-| Block Listener | 3100 | Health only |
-| Indexer | 3101 | Health only |
+| Frontend | 4001 | Web UI |
+| API (`api-go`) | 4000 | REST + WebSocket |
+| Faster Indexer | 3102 | Health only |
 | PostgreSQL | 5432 | Database |
 | Redis | 6379 | Streams + cache |
 
@@ -130,10 +129,10 @@ ws.onmessage = ({ data }) => {
 
 ```bash
 # View logs for a specific service
-docker-compose logs -f block-listener
+docker compose logs -f fasterindexer
 
 # Restart a service after editing its source
-docker-compose up -d --build block-listener
+docker compose up -d --build fasterindexer
 
 # Open a database shell
 docker exec -it explorer-postgres psql -U explorer -d explorer
@@ -143,7 +142,7 @@ docker exec -it explorer-redis redis-cli XLEN blocks:stream
 docker exec -it explorer-redis redis-cli XLEN transactions:stream
 
 # Reset everything (deletes all indexed data)
-docker-compose down -v && docker-compose up -d
+docker compose down -v && docker compose up -d
 ```
 
 ## How It Works
@@ -152,48 +151,45 @@ docker-compose down -v && docker-compose up -d
 Chain RPC
    │
    ▼
-block-listener  ──── eth_getBlockByNumber (full txs) ──┐
-                └─── eth_getBlockReceipts              ─┤
-                                                        ▼
-                                                  Redis Streams
-                                                  (blocks:stream,
-                                                   transactions:stream)
-                                                        │
-                                                        ▼
-                                                     indexer
-                                                        │
-                                                        ▼
-                                                   PostgreSQL
-                                                        │
-                                                        ▼
-                                                   API server
-                                                   ├── REST
-                                                   └── WebSocket ──→ Browser
+fasterindexer  ──── eth_getBlockByNumber ────┐
+               └─── eth_getBlockReceipts     ─┤
+                                             ▼
+                                       Redis Streams
+                                       (blocks:stream,
+                                        transactions:stream)
+                                             │
+                                             ▼
+                                        PostgreSQL
+                                             │
+                                             ▼
+                                           api-go
+                                          /      \
+                                    REST ─        ─ WebSocket ──→ Browser
 ```
 
-The block listener persists its last processed block number in Redis (`listener:lastBlock`), so it automatically resumes from where it stopped on restart — no blocks are missed.
+`fasterindexer` persists its last processed block number in Redis (`fasterindexer:lastBlock`), so it automatically resumes from where it stopped on restart — no blocks are missed.
 
 ## Troubleshooting
 
 **No blocks appearing**
 - Verify your RPC endpoint is reachable: `curl -X POST http://your-rpc:8545/ -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' -H 'Content-Type: application/json'`
-- Check listener logs: `docker-compose logs block-listener`
+- Check `fasterindexer` logs: `docker compose logs -f fasterindexer`
 
 **Transactions not indexing**
-- Check indexer logs: `docker-compose logs indexer`
+- Check `fasterindexer` logs for RPC rate-limit errors
 - Verify `transactions:stream` is growing: `docker exec explorer-redis redis-cli XLEN transactions:stream`
 
 **Services won't start**
 ```bash
-docker-compose logs        # check all logs
+docker compose logs        # check all logs
 docker --version           # requires 20+
 docker compose version     # requires v2+
 ```
 
-**Reset the listener checkpoint** (re-index from a specific block)
+**Reset the indexer checkpoint** (re-index from a specific block)
 ```bash
-docker exec explorer-redis redis-cli SET listener:lastBlock 1234567
-docker-compose restart block-listener
+docker exec explorer-redis redis-cli SET fasterindexer:lastBlock 1234567
+docker compose restart fasterindexer
 ```
 
 ## Database Backup & Restore
