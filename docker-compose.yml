@@ -49,8 +49,9 @@ services:
       RPC_URL: ${RPC_URL}
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
-      BATCH_SIZE: ${INDEXER_BATCH_SIZE:-1000}
-      POLL_MS: ${FASTERINDEXER_POLL_MS:-200}
+      BATCH_SIZE: ${FASTERINDEXER_BATCH_SIZE:-1}
+      POLL_MS: ${FASTERINDEXER_POLL_MS:-1000}
+      RPS: ${FASTERINDEXER_RPS:-1}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       START_BLOCK: ${START_BLOCK:-}
     depends_on:

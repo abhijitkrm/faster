@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/tidwall/gjson"
+	"golang.org/x/time/rate"
 )
 
 type Config struct {
@@ -27,6 +28,7 @@ type Config struct {
 	PollMs      int
 	LogLevel    string
 	StartBlock  int64
+	RPS         float64
 }
 
 func loadConfig() Config {
@@ -34,10 +36,11 @@ func loadConfig() Config {
 		RPCURL:      getEnv("RPC_URL", "http://localhost:8545"),
 		RedisURL:    getEnv("REDIS_URL", "redis://localhost:6379"),
 		DatabaseURL: getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/explorer"),
-		BatchSize:   getEnvInt("BATCH_SIZE", 1000),
-		PollMs:      getEnvInt("POLL_MS", 200),
+		BatchSize:   getEnvInt("BATCH_SIZE", 100),
+		PollMs:      getEnvInt("POLL_MS", 1000),
 		LogLevel:    getEnv("LOG_LEVEL", "info"),
 		StartBlock:  getEnvInt64("START_BLOCK", 0),
+		RPS:         getEnvFloat("RPS", 1),
 	}
 	return c
 }
@@ -55,6 +58,18 @@ func getEnvInt64(key string, def int64) int64 {
 		return def
 	}
 	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+func getEnvFloat(key string, def float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseFloat(v, 64)
 	if err != nil {
 		return def
 	}
@@ -93,13 +108,21 @@ type Stats struct {
 type rpcClient struct {
 	url string
 	c   *http.Client
+	lim *rate.Limiter
 }
 
-func newRPCClient(url string) *rpcClient {
-	return &rpcClient{url: url, c: &http.Client{Timeout: 10 * time.Second}}
+func newRPCClient(url string, rps float64) *rpcClient {
+	return &rpcClient{
+		url: url,
+		c:   &http.Client{Timeout: 10 * time.Second},
+		lim: rate.NewLimiter(rate.Limit(rps), 1),
+	}
 }
 
 func (r *rpcClient) call(ctx context.Context, method string, params []any) (gjson.Result, error) {
+	if err := r.lim.Wait(ctx); err != nil {
+		return gjson.Result{}, err
+	}
 	body := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
@@ -185,7 +208,7 @@ func main() {
 
 	idx := &Indexer{
 		cfg:       cfg,
-		rpc:       newRPCClient(cfg.RPCURL),
+		rpc:       newRPCClient(cfg.RPCURL, cfg.RPS),
 		redis:     rdb,
 		db:        db,
 		lastBlock: lastBlock,

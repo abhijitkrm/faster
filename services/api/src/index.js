@@ -157,10 +157,13 @@ class API {
               { key: 'blocks:stream',       id: lastBlockId },
               { key: 'transactions:stream', id: lastTxId    },
             ],
-            { BLOCK: 2000, COUNT: 100 }
+            { COUNT: 1000 }
           );
 
-          if (!result) continue;
+          if (!result) {
+            await new Promise((r) => setTimeout(r, 100));
+            continue;
+          }
 
           let hasNewBlocks = false;
 
@@ -214,6 +217,8 @@ class API {
               this.broadcast({ type: 'stats', data: stats });
             } catch {}
           }
+
+          // Poll again immediately if we got data; otherwise sleep in the !result branch
         } catch (err) {
           logger.error('Stream listener error:', err.message);
           await new Promise((r) => setTimeout(r, 1000));
