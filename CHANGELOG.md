@@ -5,6 +5,31 @@ Format: **[date] — type: description**
 
 ---
 
+## [2026-08-27]
+
+### Added
+- **Fasterindexer (`services/fasterindexer`)** — new Go-based indexer that replaces both the Node `block-listener` and `indexer`:
+  - Single binary polls `eth_blockNumber`, fetches full blocks + receipts in parallel, and writes directly to Postgres
+  - Uses `pgx.CopyFrom` into unlogged staging tables, then `INSERT ... ON CONFLICT` merge into main tables
+  - Publishes `blocks:stream` and `transactions:stream` XADDs so the API real-time WebSocket feed keeps working
+  - Persists `fasterindexer:lastBlock` in Redis to resume across restarts
+  - Health endpoint on `http://localhost:3102/health`
+- **TypeScript frontend** — all `src/*.jsx` files converted to `.tsx`, `tsconfig.json` added, build verified
+- **Benchmark suite** — `main_test.go` with `BenchmarkNormalize` and `BenchmarkHexToDec` for performance regression testing
+
+### Improved
+- **Latest Blocks / Latest Transactions panels** now render the same number of rows (`ROWS = 20` in `Home.jsx`)
+- **Transaction log display** in `TxDetail.jsx` now parses stored log JSON, highlights known event signatures (`Transfer`, `Approval`), and decodes the raw data hex
+- **Contract address topic display** in logs — indexed address topics are rendered as clickable address links
+
+### Removed
+- **Prometheus** removed from `docker-compose.yml` to simplify the stack and avoid a crash loop on non-existent Redis/Postgres exporters
+
+### Fixed
+- **Indexer `log_index` null constraint error** — the Node indexer was using `log.index` (undefined) instead of `log.logIndex`, causing every transaction batch to fail and the `transactions` table to stay empty
+
+---
+
 ## [2026-03-08]
 
 ### Fixed

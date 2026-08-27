@@ -39,49 +39,27 @@ services:
     networks:
       - explorer-network
 
-  # Block Listener Service
-  block-listener:
+  # Faster Indexer (replaces block-listener + indexer)
+  fasterindexer:
     build:
-      context: ./services/block-listener
+      context: ./services/fasterindexer
       dockerfile: Dockerfile
-    container_name: explorer-block-listener
+    container_name: explorer-fasterindexer
     environment:
       RPC_URL: ${RPC_URL}
-      WS_URL: ${WS_URL}
-      REDIS_URL: redis://redis:6379
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      NODE_ENV: ${NODE_ENV:-production}
-    depends_on:
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3100/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    restart: unless-stopped
-    networks:
-      - explorer-network
-
-  # Indexer Service
-  indexer:
-    build:
-      context: ./services/indexer
-      dockerfile: Dockerfile
-    container_name: explorer-indexer
-    environment:
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
-      BATCH_SIZE: ${INDEXER_BATCH_SIZE:-100}
+      BATCH_SIZE: ${INDEXER_BATCH_SIZE:-1000}
+      POLL_MS: ${FASTERINDEXER_POLL_MS:-200}
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      NODE_ENV: ${NODE_ENV:-production}
+      START_BLOCK: ${START_BLOCK:-}
     depends_on:
       redis:
         condition: service_healthy
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3101/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:3102/health"]
       interval: 30s
       timeout: 10s
       retries: 3
