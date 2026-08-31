@@ -9,13 +9,13 @@ A high-performance, real-time EVM block explorer built on Docker using **Go** an
 ## Features
 
 - **Real-time streaming** — blocks and transactions pushed to the UI as they land on chain
-- **Parallel block ingestion in Go** — `fasterindexer` uses goroutines and an RPS rate limiter to fetch blocks + receipts from any EVM RPC
-- **Full data pipeline** — `fasterindexer` → Redis Streams → PostgreSQL → `api-go` → WebSocket → frontend
-- **Go-based API gateway** — `api-go` serves REST and uses goroutines for low-latency WebSocket broadcasting
+- **Parallel block ingestion in Go** — `indexer` uses goroutines and an RPS rate limiter to fetch blocks + receipts from any EVM RPC
+- **Full data pipeline** — `indexer` → Redis Streams → PostgreSQL → `api` → WebSocket → frontend
+- **Go-based API gateway** — `api` serves REST and uses goroutines for low-latency WebSocket broadcasting
 - **Address activity tracking** — transaction counts and history per address
 - **Instantaneous TPS** — calculated from latest block tx count ÷ recent avg block time
 - **Terminal dark UI** — built with React + Vite, zero external UI dependencies
-- **Resumable indexing** — `fasterindexer` saves checkpoint to Redis, picks up where it left off on restart
+- **Resumable indexing** — `indexer` saves checkpoint to Redis, picks up where it left off on restart
 - **Health endpoints** on every service
 
 ## Prerequisites
@@ -79,10 +79,10 @@ VITE_API_URL=http://localhost:4000
 
 | Component | Technology |
 |-----------|-----------|
-| Indexer | Go (`fasterindexer`), raw JSON-RPC, Redis Streams, PostgreSQL |
+| Indexer | Go (`indexer`), raw JSON-RPC, Redis Streams, PostgreSQL |
 | Message Queue | Redis Streams |
 | Database | PostgreSQL 15 |
-| API | Go (`api-go`) + Gorilla WebSocket |
+| API | Go (`api`) + Gorilla WebSocket |
 | Frontend | React 18 + Vite |
 | Container | Docker + Docker Compose |
 
@@ -120,7 +120,7 @@ ws.onmessage = ({ data }) => {
 | Service | Port | Purpose |
 |---------|------|---------|
 | Frontend | 4001 | Web UI |
-| API (`api-go`) | 4000 | REST + WebSocket |
+| API (`api`) | 4000 | REST + WebSocket |
 | Faster Indexer | 3102 | Health only |
 | PostgreSQL | 5432 | Database |
 | Redis | 6379 | Streams + cache |
@@ -129,17 +129,17 @@ ws.onmessage = ({ data }) => {
 
 ```bash
 # View logs for a specific service
-docker compose logs -f fasterindexer
+docker compose logs -f indexer
 
 # Restart a service after editing its source
-docker compose up -d --build fasterindexer
+docker compose up -d --build indexer
 
 # Open a database shell
-docker exec -it explorer-postgres psql -U explorer -d explorer
+docker exec -it faster-postgresql psql -U explorer -d explorer
 
 # Check Redis stream lengths
-docker exec -it explorer-redis redis-cli XLEN blocks:stream
-docker exec -it explorer-redis redis-cli XLEN transactions:stream
+docker exec -it faster-redis redis-cli XLEN blocks:stream
+docker exec -it faster-redis redis-cli XLEN transactions:stream
 
 # Reset everything (deletes all indexed data)
 docker compose down -v && docker compose up -d
@@ -151,7 +151,7 @@ docker compose down -v && docker compose up -d
 Chain RPC
    │
    ▼
-fasterindexer  ──── eth_getBlockByNumber ────┐
+indexer  ──── eth_getBlockByNumber ────┐
                └─── eth_getBlockReceipts     ─┤
                                              ▼
                                        Redis Streams
@@ -162,7 +162,7 @@ fasterindexer  ──── eth_getBlockByNumber ────┐
                                         PostgreSQL
                                              │
                                              ▼
-                                           api-go
+                                           api
                                           /      \
                                     REST ─        ─ WebSocket ──→ Browser
 ```
@@ -173,11 +173,11 @@ fasterindexer  ──── eth_getBlockByNumber ────┐
 
 **No blocks appearing**
 - Verify your RPC endpoint is reachable: `curl -X POST http://your-rpc:8545/ -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' -H 'Content-Type: application/json'`
-- Check `fasterindexer` logs: `docker compose logs -f fasterindexer`
+- Check `indexer` logs: `docker compose logs -f indexer`
 
 **Transactions not indexing**
-- Check `fasterindexer` logs for RPC rate-limit errors
-- Verify `transactions:stream` is growing: `docker exec explorer-redis redis-cli XLEN transactions:stream`
+- Check `indexer` logs for RPC rate-limit errors
+- Verify `transactions:stream` is growing: `docker exec faster-redis redis-cli XLEN transactions:stream`
 
 **Services won't start**
 ```bash
@@ -188,18 +188,18 @@ docker compose version     # requires v2+
 
 **Reset the indexer checkpoint** (re-index from a specific block)
 ```bash
-docker exec explorer-redis redis-cli SET fasterindexer:lastBlock 1234567
-docker compose restart fasterindexer
+docker exec faster-redis redis-cli SET fasterindexer:lastBlock 1234567
+docker compose restart indexer
 ```
 
 ## Database Backup & Restore
 
 ```bash
 # Backup
-docker exec explorer-postgres pg_dump -U explorer explorer > backup.sql
+docker exec faster-postgresql pg_dump -U explorer explorer > backup.sql
 
 # Restore
-docker exec -i explorer-postgres psql -U explorer explorer < backup.sql
+docker exec -i faster-postgresql psql -U explorer explorer < backup.sql
 ```
 
 ## Security Notes

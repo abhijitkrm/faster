@@ -1,10 +1,8 @@
-version: '3.8'
-
 services:
   # PostgreSQL Database
-  postgres:
+  postgresql:
     image: postgres:15-alpine
-    container_name: explorer-postgres
+    container_name: faster-postgresql
     environment:
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
@@ -25,7 +23,7 @@ services:
   # Redis Cache & Message Queue
   redis:
     image: redis:7-alpine
-    container_name: explorer-redis
+    container_name: faster-redis
     ports:
       - "6379:6379"
     volumes:
@@ -40,15 +38,16 @@ services:
       - explorer-network
 
   # Faster Indexer (replaces block-listener + indexer)
-  fasterindexer:
+  indexer:
     build:
       context: ./services/fasterindexer
       dockerfile: Dockerfile
-    container_name: explorer-fasterindexer
+    image: faster:indexer
+    container_name: faster-indexer
     environment:
       RPC_URL: ${RPC_URL}
       REDIS_URL: redis://redis:6379
-      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@postgresql:5432/${DB_NAME}
       BATCH_SIZE: ${FASTERINDEXER_BATCH_SIZE:-1}
       POLL_MS: ${FASTERINDEXER_POLL_MS:-1000}
       RPS: ${FASTERINDEXER_RPS:-1}
@@ -57,7 +56,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      postgres:
+      postgresql:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3102/health"]
@@ -69,21 +68,22 @@ services:
       - explorer-network
 
   # API Service (Go)
-  api-go:
+  api:
     build:
       context: ./services/api-go
       dockerfile: Dockerfile
-    container_name: explorer-api-go
+    image: faster:api
+    container_name: faster-api
     ports:
       - "4000:3000"
     environment:
-      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
+      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@postgresql:5432/${DB_NAME}
       REDIS_URL: redis://redis:6379
       RPC_URL: ${RPC_URL}
       PORT: 3000
       LOG_LEVEL: ${LOG_LEVEL:-info}
     depends_on:
-      postgres:
+      postgresql:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -103,11 +103,12 @@ services:
       dockerfile: Dockerfile
       args:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:4000}
-    container_name: explorer-frontend
+    image: faster:frontend
+    container_name: faster-frontend
     ports:
       - "4001:5173"
     depends_on:
-      - api-go
+      - api
     environment:
       NODE_ENV: ${NODE_ENV:-production}
     restart: unless-stopped
