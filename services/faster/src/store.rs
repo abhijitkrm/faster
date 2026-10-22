@@ -1145,6 +1145,56 @@ impl Store {
         Ok(out)
     }
 
+    /// Transfers of a token (`by_token`) or involving an address with
+    /// start <= block <= end, newest first (oldest first with `asc`),
+    /// filtered by `keep`, skipping `offset` matches.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transfers_range(
+        &self,
+        a: &Addr,
+        by_token: bool,
+        start: u64,
+        end: u64,
+        asc: bool,
+        offset: usize,
+        limit: usize,
+        keep: &dyn Fn(&crate::tokens::Transfer) -> bool,
+    ) -> Result<Vec<(u64, crate::tokens::Transfer)>> {
+        let end = end.min(self.head_number().unwrap_or(0));
+        if start > end {
+            return Ok(Vec::new());
+        }
+        let cf = self.cf(if by_token { CF_TT_TOKEN } else { CF_TT_ADDR });
+        let mode_key = if asc { k_tt_by(a, start, 0, 0) } else { k_tt_by(a, end, u32::MAX, u16::MAX) };
+        let it = self
+            .db
+            .iterator_cf(cf, IteratorMode::From(&mode_key, if asc { Direction::Reverse } else { Direction::Forward }));
+        let mut counts = HashMap::new();
+        let (mut skipped, mut out) = (0usize, Vec::with_capacity(limit));
+        for kv in it {
+            let (k, _) = kv?;
+            if !k.starts_with(a) || out.len() >= limit {
+                break;
+            }
+            let n = !u64::from_be_bytes(k[20..28].try_into()?);
+            if n < start || n > end {
+                break;
+            }
+            let l = !u32::from_be_bytes(k[28..32].try_into()?);
+            let sb = !u16::from_be_bytes(k[32..34].try_into()?);
+            let Some(t) = self.get_rec::<crate::tokens::Transfer>(CF_TT, &k_tt(n, l, sb))? else { continue };
+            if !keep(&t) || !self.transfer_ok(n, &t, &mut counts)? {
+                continue;
+            }
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+            out.push((n, t));
+        }
+        Ok(out)
+    }
+
     /// Token transfers emitted by one transaction.
     pub fn tx_transfers(&self, t: &TxRec) -> Result<Vec<crate::tokens::Transfer>> {
         if t.log_count == 0 {
@@ -1265,6 +1315,80 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// Transactions of `a` with start <= block <= end, newest first (or
+    /// oldest first with `asc`), skipping `offset`.
+    pub fn addr_txs_range(
+        &self,
+        a: &Addr,
+        start: u64,
+        end: u64,
+        asc: bool,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<TxRec>> {
+        let end = end.min(self.head_number().unwrap_or(0));
+        if start > end {
+            return Ok(Vec::new());
+        }
+        let cf = self.cf(CF_ADDR_TX);
+        let mut keys = Vec::with_capacity(limit);
+        let mut push = |k: &[u8]| -> Result<bool> {
+            if !k.starts_with(a) {
+                return Ok(false);
+            }
+            let n = !u64::from_be_bytes(k[20..28].try_into()?);
+            if n < start || n > end {
+                return Ok(false);
+            }
+            keys.push(k_num_idx(n, !u32::from_be_bytes(k[28..32].try_into()?)));
+            Ok(true)
+        };
+        if asc {
+            // The largest key of block `start` is its oldest entry; walking
+            // backwards from it visits blocks start, start+1, ...
+            let k = k_addr_tx(a, start, 0);
+            for kv in self.db.iterator_cf(cf, IteratorMode::From(&k, Direction::Reverse)).skip(offset).take(limit) {
+                if !push(&kv?.0)? {
+                    break;
+                }
+            }
+        } else {
+            let k = k_addr_tx(a, end, u32::MAX);
+            for kv in self.db.iterator_cf(cf, IteratorMode::From(&k, Direction::Forward)).skip(offset).take(limit) {
+                if !push(&kv?.0)? {
+                    break;
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(keys.len());
+        for k in keys {
+            let (n, i) = split_num_idx(&k);
+            if let Some(t) = self.tx(n, i)?.filter(|t| tx_parties(t).iter().any(|(x, _)| x == a)) {
+                out.push(t);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Highest block with timestamp <= ts ("before") or lowest with
+    /// timestamp >= ts ("after"); timestamps are non-decreasing.
+    pub fn block_by_time(&self, ts: u64, after: bool) -> Result<Option<u64>> {
+        let Some(head) = self.head_number() else { return Ok(None) };
+        let time = |n: u64| -> Result<u64> { Ok(self.block(n)?.map_or(u64::MAX, |b| b.timestamp)) };
+        // first block with timestamp > ts (or >= ts for "after")
+        let (mut lo, mut hi) = (0u64, head + 1);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let t = time(mid)?;
+            if (after && t >= ts) || (!after && t > ts) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        Ok(if after { (lo <= head).then_some(lo) } else { lo.checked_sub(1) })
     }
 
     /// Addresses whose hex form starts with `prefix` (lower-case, no 0x).
@@ -1591,5 +1715,31 @@ mod token_tests {
         assert_eq!(bal(&s, nft, a(1)), 1);
         assert_eq!(bal(&s, nft, a(3)), 0);
         assert!(s.transfers_by(&a(3), false, None, 10).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::tests::*;
+
+    #[test]
+    fn ranged_history_and_time_lookup() {
+        let d = tempfile::tempdir().unwrap();
+        let s = open(d.path());
+        let blocks: Vec<_> =
+            (0..6).map(|n| block(n, 1, 1, vec![(a(1), Some(a(2)), None), (a(3), Some(a(1)), None)])).collect();
+        s.apply(&blocks).unwrap();
+        let ids = |v: Vec<crate::types::TxRec>| v.iter().map(|t| (t.block_number, t.index)).collect::<Vec<_>>();
+        assert_eq!(ids(s.addr_txs_range(&a(1), 2, 3, false, 0, 10).unwrap()), vec![(3, 1), (3, 0), (2, 1), (2, 0)]);
+        assert_eq!(ids(s.addr_txs_range(&a(1), 2, 3, true, 0, 10).unwrap()), vec![(2, 0), (2, 1), (3, 0), (3, 1)]);
+        assert_eq!(ids(s.addr_txs_range(&a(1), 0, 99, true, 3, 2).unwrap()), vec![(1, 1), (2, 0)]);
+        assert_eq!(ids(s.addr_txs_range(&a(2), 5, 5, false, 0, 10).unwrap()), vec![(5, 0)]);
+        // timestamps are 1000 + n
+        assert_eq!(s.block_by_time(1003, false).unwrap(), Some(3));
+        assert_eq!(s.block_by_time(1003, true).unwrap(), Some(3));
+        assert_eq!(s.block_by_time(999, false).unwrap(), None);
+        assert_eq!(s.block_by_time(999, true).unwrap(), Some(0));
+        assert_eq!(s.block_by_time(2000, false).unwrap(), Some(5));
+        assert_eq!(s.block_by_time(2000, true).unwrap(), None);
     }
 }

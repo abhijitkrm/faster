@@ -7,6 +7,7 @@ mod clob;
 mod clob_it;
 #[cfg(test)]
 mod e2e_test;
+mod etherscan;
 mod guard;
 mod indexer;
 mod metrics;

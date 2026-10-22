@@ -100,6 +100,24 @@ Transfer fields: `block_number`, `block_timestamp`, `transaction_hash`,
 address (`type: "token"` if it is a token contract) or token name / symbol
 prefix: `[{"type": "block" | "transaction" | "address" | "token", "value": ...}]`.
 
+## Etherscan-compatible API
+
+`GET /api?module=...&action=...` with Etherscan's envelope
+(`{"status":"1","message":"OK","result":...}`, all values strings):
+
+| module / action | parameters |
+|---|---|
+| `account` / `balance` | `address` |
+| `account` / `balancemulti` | `address` (comma-separated, ≤ 20) |
+| `account` / `txlist` | `address`, `startblock`, `endblock`, `page`, `offset`, `sort` (asc default) |
+| `account` / `tokentx`, `tokennfttx`, `token1155tx` | `address` and/or `contractaddress`, same paging |
+| `account` / `txlistinternal` | `address` or `txhash` (requires `TRACE_CALLS=true`) |
+| `block` / `getblocknumberbytime` | `timestamp`, `closest` (before / after) |
+| `transaction` / `gettxreceiptstatus` | `txhash` |
+| `proxy` / `eth_blockNumber` | — |
+
+`page × offset` is capped at 10,000 as on Etherscan.
+
 ## Stats and health
 
 `GET /stats`:

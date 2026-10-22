@@ -382,6 +382,7 @@ pub fn router(state: AppState, limiter: Arc<crate::guard::Limiter>) -> Router {
         .route("/api/addresses", get(addresses_list))
         .route("/api/addresses/search/by-pattern", get(addresses_search))
         .route("/api/addresses/{addr}", get(address_detail))
+        .route("/api", get(crate::etherscan::handler))
         .route("/api/tokens", get(tokens_list))
         .route("/api/tokens/{addr}", get(token_detail))
         .route("/api/tokens/{addr}/transfers", get(token_transfers))
