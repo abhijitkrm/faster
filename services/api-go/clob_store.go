@@ -370,7 +370,8 @@ func (s *chClobStore) checkpoint(ctx context.Context) (uint64, error) {
 	return h, err
 }
 
-func (s *chClobStore) Block(ctx context.Context, height uint64, limit int) (*clobBlockResponse, *clobBlockMissing, error) {
+func (s *chClobStore) Block(ctx context.Context, height uint64, page clobBlockPage) (*clobBlockResponse, *clobBlockMissing, error) {
+	limit := page.Limit
 	rows, err := s.query(ctx, params("h", u64(height)), `
 		SELECT toUnixTimestamp64Nano(block_time), orders, cancels, fills, rejected
 		FROM `+s.t("blocks")+` WHERE height = {h:UInt64} LIMIT 1`)
@@ -416,10 +417,12 @@ func (s *chClobStore) Block(ctx context.Context, height uint64, limit int) (*clo
 	}
 	b.Height = height
 	b.BlockTime, b.BlockTimeNs = timeFields(ts)
-	p := params("ts", strconv.FormatInt(ts, 10), "h", u64(height), "lim", strconv.Itoa(limit))
+	p := params("ts", strconv.FormatInt(ts, 10), "h", u64(height), "lim", strconv.Itoa(limit),
+		"oa", strconv.FormatInt(page.OrdersAfter, 10), "ca", strconv.FormatInt(page.CancelsAfter, 10),
+		"fa", strconv.FormatInt(page.FillsAfter, 10))
 	if b.Counts.Orders > 0 {
 		r, err := s.query(ctx, p, `SELECT `+orderCols+` FROM `+s.t("orders")+` WHERE `+pinned+`
-			ORDER BY idx LIMIT 1 BY idx LIMIT {lim:UInt32}`)
+			AND idx > {oa:Int64} ORDER BY idx LIMIT 1 BY idx LIMIT {lim:UInt32}`)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -429,7 +432,7 @@ func (s *chClobStore) Block(ctx context.Context, height uint64, limit int) (*clo
 	}
 	if b.Counts.Cancels > 0 {
 		r, err := s.query(ctx, p, `SELECT `+cancelCols+` FROM `+s.t("cancels")+` WHERE `+pinned+`
-			ORDER BY idx LIMIT 1 BY idx LIMIT {lim:UInt32}`)
+			AND idx > {ca:Int64} ORDER BY idx LIMIT 1 BY idx LIMIT {lim:UInt32}`)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -439,7 +442,7 @@ func (s *chClobStore) Block(ctx context.Context, height uint64, limit int) (*clo
 	}
 	if b.Counts.Fills > 0 {
 		r, err := s.query(ctx, p, `SELECT `+fillCols+` FROM `+s.t("fills")+` WHERE `+pinned+`
-			ORDER BY seq LIMIT 1 BY seq LIMIT {lim:UInt32}`)
+			AND seq > {fa:Int64} ORDER BY seq LIMIT 1 BY seq LIMIT {lim:UInt32}`)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -457,6 +460,23 @@ func (s *chClobStore) Block(ctx context.Context, height uint64, limit int) (*clo
 		b.Fills = []clobFill{}
 	}
 	b.Truncated = len(b.Orders) < int(b.Counts.Orders) || len(b.Cancels) < int(b.Counts.Cancels) || len(b.Fills) < int(b.Counts.Fills)
+	// idx and seq are dense (0..count-1): more remain past a full page
+	// whose last position is below count-1.
+	next := func(n int, last, count uint32) *uint32 {
+		if n == limit && last+1 < count {
+			return &last
+		}
+		return nil
+	}
+	if n := len(b.Orders); n > 0 {
+		b.NextOrders = next(n, b.Orders[n-1].Idx, b.Counts.Orders)
+	}
+	if n := len(b.Cancels); n > 0 {
+		b.NextCancels = next(n, b.Cancels[n-1].Idx, b.Counts.Cancels)
+	}
+	if n := len(b.Fills); n > 0 {
+		b.NextFills = next(n, b.Fills[n-1].Seq, b.Counts.Fills)
+	}
 	return &b, nil, nil
 }
 

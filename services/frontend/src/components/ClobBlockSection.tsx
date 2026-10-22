@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { fetchJSON, OrdersTable, CancelsTable, FillsTable } from '../clob';
+import { fetchJSON, OrdersTable, CancelsTable, FillsTable, btnStyle } from '../clob';
 
 // CLOB section of the block page. Loads /api/clob/blocks/:height only when the
 // section scrolls into view, so plain block browsing never hits ClickHouse.
@@ -41,6 +41,36 @@ export default function ClobBlockSection({ height }) {
     return () => { cancelled = true; };
   }, [visible, height]);
 
+  // A block holds up to 100K+ items: each list pages with its own cursor
+  // (next_orders_after / next_cancels_after / next_fills_after).
+  const [more, setMore] = useState('');
+  const loadMore = (list) => {
+    const d0 = state.data;
+    const cursor = d0?.[`next_${list}_after`];
+    if (cursor == null || more) return;
+    setMore(list);
+    fetchJSON(`/api/clob/blocks/${height}?limit=500&${list}_after=${cursor}`)
+      .then(({ status, body }) => {
+        if (status !== 200) return;
+        setState((st) => st.data ? {
+          ...st,
+          data: {
+            ...st.data,
+            [list]: [...st.data[list], ...body[list]],
+            [`next_${list}_after`]: body[`next_${list}_after`],
+          },
+        } : st);
+      })
+      .finally(() => setMore(''));
+  };
+  const moreButton = (list, shown, total) => d?.[`next_${list}_after`] != null && (
+    <div style={{ padding: 14, textAlign: 'center' }}>
+      <button style={btnStyle} disabled={!!more} onClick={() => loadMore(list)}>
+        {more === list ? 'Loading…' : `Load more (${shown.toLocaleString()} of ${Number(total).toLocaleString()})`}
+      </button>
+    </div>
+  );
+
   const d = state.data;
   return (
     <div ref={ref} style={{ marginTop: 24 }}>
@@ -51,7 +81,7 @@ export default function ClobBlockSection({ height }) {
             {d.counts.orders} order{d.counts.orders !== 1 ? 's' : ''} · {d.counts.cancels} cancel/amend
             · {d.counts.fills} fill{d.counts.fills !== 1 ? 's' : ''}
             {d.counts.rejected > 0 && ` · ${d.counts.rejected} rejected`}
-            {d.truncated && ' · showing the first 500 of each'}
+
           </span>
         )}
       </div>
@@ -67,18 +97,21 @@ export default function ClobBlockSection({ height }) {
                   <div className="panel" style={{ marginBottom: 14 }}>
                     <div className="panel-head"><span className="panel-title">Orders</span></div>
                     <OrdersTable orders={d.orders} showBlock={false} />
+                    {moreButton('orders', d.orders.length, d.counts.orders)}
                   </div>
                 )}
                 {d.cancels.length > 0 && (
                   <div className="panel" style={{ marginBottom: 14 }}>
                     <div className="panel-head"><span className="panel-title">Cancels / Amends</span></div>
                     <CancelsTable cancels={d.cancels} showBlock={false} />
+                    {moreButton('cancels', d.cancels.length, d.counts.cancels)}
                   </div>
                 )}
                 {d.fills.length > 0 && (
                   <div className="panel">
                     <div className="panel-head"><span className="panel-title">Fills</span></div>
                     <FillsTable fills={d.fills} showBlock={false} />
+                    {moreButton('fills', d.fills.length, d.counts.fills)}
                   </div>
                 )}
               </>

@@ -138,7 +138,10 @@ type clobBlockCounts struct {
 }
 
 // clobBlockResponse is GET /api/clob/blocks/{height}. Each list holds at most
-// ?limit= items (in block order); counts are the full totals.
+// ?limit= items (in block order); counts are the full totals. A block can hold
+// 100K+ items: ?orders_after=, ?cancels_after= (idx) and ?fills_after= (seq)
+// page each list, and next_*_after is the cursor for the next page (absent
+// when the list is complete).
 type clobBlockResponse struct {
 	Height      uint64          `json:"height"`
 	BlockTime   string          `json:"block_time"`
@@ -148,6 +151,16 @@ type clobBlockResponse struct {
 	Cancels     []clobCancel    `json:"cancels"`
 	Fills       []clobFill      `json:"fills"`
 	Truncated   bool            `json:"truncated"`
+	NextOrders  *uint32         `json:"next_orders_after,omitempty"`
+	NextCancels *uint32         `json:"next_cancels_after,omitempty"`
+	NextFills   *uint32         `json:"next_fills_after,omitempty"`
+}
+
+// clobBlockPage selects one page of each of a block's lists: items with
+// idx/seq greater than the *After cursor (-1 = from the start).
+type clobBlockPage struct {
+	Limit                                 int
+	OrdersAfter, CancelsAfter, FillsAfter int64
 }
 
 // clobBlockMissing explains a 404 for a block: never loaded, or a gap.
@@ -190,7 +203,7 @@ type clobStore interface {
 	TraderCancels(ctx context.Context, trader []byte, before clobCursor, limit int) ([]clobCancel, error)
 	TraderFills(ctx context.Context, trader []byte, before clobCursor, limit int) ([]clobTraderFill, error)
 	PairTrades(ctx context.Context, pair uint32, before clobCursor, limit int) ([]clobFill, error)
-	Block(ctx context.Context, height uint64, limit int) (*clobBlockResponse, *clobBlockMissing, error)
+	Block(ctx context.Context, height uint64, page clobBlockPage) (*clobBlockResponse, *clobBlockMissing, error)
 	Stats(ctx context.Context) (*clobStats, error)
 }
 
@@ -403,7 +416,21 @@ func (a *clobAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		blk, missing, err := a.store.Block(ctx, h, limit)
+		page := clobBlockPage{Limit: limit, OrdersAfter: -1, CancelsAfter: -1, FillsAfter: -1}
+		for _, c := range []struct {
+			name string
+			dst  *int64
+		}{{"orders_after", &page.OrdersAfter}, {"cancels_after", &page.CancelsAfter}, {"fills_after", &page.FillsAfter}} {
+			if v := q.Get(c.name); v != "" {
+				n, err := strconv.ParseUint(v, 10, 32)
+				if err != nil {
+					clobError(w, http.StatusBadRequest, c.name+" must be a non-negative integer")
+					return
+				}
+				*c.dst = int64(n)
+			}
+		}
+		blk, missing, err := a.store.Block(ctx, h, page)
 		if err != nil {
 			a.fail(w, r, err)
 			return

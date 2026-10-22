@@ -48,8 +48,8 @@ func (f *fakeClobStore) PairTrades(_ context.Context, p uint32, b clobCursor, l 
 	f.lastPair, f.lastBefore, f.lastLimit = p, b, l
 	return []clobFill{}, f.err
 }
-func (f *fakeClobStore) Block(_ context.Context, h uint64, l int) (*clobBlockResponse, *clobBlockMissing, error) {
-	f.lastLimit = l
+func (f *fakeClobStore) Block(_ context.Context, h uint64, p clobBlockPage) (*clobBlockResponse, *clobBlockMissing, error) {
+	f.lastLimit = p.Limit
 	return f.block, f.missing, f.err
 }
 func (f *fakeClobStore) Stats(context.Context) (*clobStats, error) {
