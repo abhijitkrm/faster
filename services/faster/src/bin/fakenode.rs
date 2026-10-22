@@ -85,7 +85,10 @@ impl Chain {
                 let mk = |li: u64| {
                     format!(
                         r#"{{"address":"{}","topics":["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef","0x000000000000000000000000{:040x}","0x000000000000000000000000{:040x}"],"data":"0x{:064x}","logIndex":"0x{li:x}","transactionIndex":"0x{i:x}","blockNumber":"0x{n:x}"}}"#,
-                        addr(0xc0ffee), from, to, i + 1
+                        addr(0xc0ffee),
+                        from,
+                        to,
+                        i + 1
                     )
                 };
                 let s = format!("{},{}", mk(li), mk(li + 1));

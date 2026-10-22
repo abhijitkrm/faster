@@ -24,8 +24,8 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 use bincode::Options as _;
 use rocksdb::{
-    BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, DBCompressionType, Direction,
-    IteratorMode, Options, ReadOptions, WriteBatch, WriteOptions, DB,
+    BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, DBCompressionType, Direction, IteratorMode,
+    Options, ReadOptions, WriteBatch, WriteOptions, DB,
 };
 use serde::{Deserialize, Serialize};
 
@@ -836,11 +836,8 @@ mod tests {
         s.apply(&[block(0, 1, 1, vec![(a(1), Some(a(2)), None)])]).unwrap();
         let before_counters = s.counters().unwrap();
         let before_a1 = s.addr_info(&a(1)).unwrap();
-        s.apply(&[
-            block(1, 1, 1, vec![(a(1), Some(a(3)), None)]),
-            block(2, 1, 1, vec![(a(3), None, Some(a(4)))]),
-        ])
-        .unwrap();
+        s.apply(&[block(1, 1, 1, vec![(a(1), Some(a(3)), None)]), block(2, 1, 1, vec![(a(3), None, Some(a(4)))])])
+            .unwrap();
         let tx2 = s.block_txs(2).unwrap()[0].hash;
         assert_eq!(s.rollback_head().unwrap(), Some(Head { number: 1, hash: h(1, 1) }));
         assert_eq!(s.rollback_head().unwrap(), Some(Head { number: 0, hash: h(0, 1) }));

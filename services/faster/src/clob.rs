@@ -49,7 +49,8 @@ pub enum ChError {
 
 fn valid_ident(s: &str) -> bool {
     let mut c = s.chars();
-    matches!(c.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_') && c.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    matches!(c.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
+        && c.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 impl Clob {
@@ -198,9 +199,9 @@ fn fail(path: &str, e: ChError) -> Response {
 }
 
 fn store(s: &AppState) -> Result<&Clob, Response> {
-    s.clob.as_deref().ok_or_else(|| {
-        err(StatusCode::SERVICE_UNAVAILABLE, "CLOB archive not configured (set CLICKHOUSE_URL)")
-    })
+    s.clob
+        .as_deref()
+        .ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "CLOB archive not configured (set CLICKHOUSE_URL)"))
 }
 
 fn parse_limit(q: &Option<String>, def: u64) -> Result<u64, Response> {
@@ -396,7 +397,8 @@ pub async fn pair_trades(State(s): State<AppState>, Path(pair): Path<String>, Qu
          ORDER BY height DESC, seq DESC LIMIT 1 BY height, seq LIMIT {{lim:UInt32}}",
         c.t("fills")
     );
-    let params = [("pair", pair.to_string()), ("bh", bh.to_string()), ("bp", bp.to_string()), ("lim", limit.to_string())];
+    let params =
+        [("pair", pair.to_string()), ("bh", bh.to_string()), ("bp", bp.to_string()), ("lim", limit.to_string())];
     match c.query(&sql, &params).await {
         Ok(rows) => list(finish(rows, &[]), limit, |v| (num(v, "height"), num(v, "seq"))).into_response(),
         Err(e) => fail("/api/clob/pairs/trades", e),
@@ -462,9 +464,8 @@ async fn item(c: &Clob, h: &str) -> Result<Option<Value>, ChError> {
         }
     }
     // The primary item: the first executed (non-rejected) occurrence, else the first.
-    let pick = |items: &[Value]| -> Value {
-        items.iter().find(|v| v["status"] != "rejected").unwrap_or(&items[0]).clone()
-    };
+    let pick =
+        |items: &[Value]| -> Value { items.iter().find(|v| v["status"] != "rejected").unwrap_or(&items[0]).clone() };
     let mut res = json!({"hash": format!("0x{h}"), "fills": [], "occurrences": occurrences});
     if !orders.is_empty() {
         let o = pick(&orders);
@@ -557,7 +558,8 @@ async fn block_query(c: &Clob, height: u64, limit: u64, after: [i64; 3]) -> Resu
             )
             .await?;
         let gap = gap.first().and_then(|r| r.get("reason").and_then(|v| v.as_str())).unwrap_or("");
-        let mut body = json!({"error": "block not in CLOB archive", "latest_loaded_height": cp, "not_loaded_yet": height > cp});
+        let mut body =
+            json!({"error": "block not in CLOB archive", "latest_loaded_height": cp, "not_loaded_yet": height > cp});
         // Go marshals an empty Gap as "" under this key too.
         body["gap"] = json!(gap);
         return Ok((StatusCode::NOT_FOUND, Json(body)).into_response());

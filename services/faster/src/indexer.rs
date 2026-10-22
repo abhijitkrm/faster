@@ -91,7 +91,13 @@ impl Indexer {
             if last_log.elapsed() >= Duration::from_secs(10) {
                 let h = self.store.head()?.map(|h| h.number).unwrap_or(0);
                 let rate = (h.saturating_sub(last_logged_head)) as f64 / last_log.elapsed().as_secs_f64();
-                tracing::info!(head = h, tip, lag = tip.saturating_sub(h), blocks_per_s = format!("{rate:.1}"), "progress");
+                tracing::info!(
+                    head = h,
+                    tip,
+                    lag = tip.saturating_sub(h),
+                    blocks_per_s = format!("{rate:.1}"),
+                    "progress"
+                );
                 last_log = Instant::now();
                 last_logged_head = h;
             }
@@ -102,10 +108,8 @@ impl Indexer {
     /// and commits in order. Stops early if a block does not chain on.
     async fn round(&self, head: Option<Head>, next: u64, end: u64) -> Result<Round> {
         let batch = self.cfg.fetch_batch as u64;
-        let chunks: Vec<Vec<u64>> = (next..=end)
-            .step_by(batch as usize)
-            .map(|s| (s..=end.min(s + batch - 1)).collect())
-            .collect();
+        let chunks: Vec<Vec<u64>> =
+            (next..=end).step_by(batch as usize).map(|s| (s..=end.min(s + batch - 1)).collect()).collect();
         // Each fetch (HTTP + JSON decode) is its own task, so decoding runs on
         // all cores and keeps going while the store commits.
         let rpc = self.rpc.clone();

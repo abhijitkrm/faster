@@ -104,22 +104,44 @@ impl Metrics {
         g(&mut o, "faster_blocks_indexed_total", "Blocks committed", "counter", self.blocks_indexed.load(Relaxed));
         g(&mut o, "faster_txs_indexed_total", "Transactions committed", "counter", self.txs_indexed.load(Relaxed));
         g(&mut o, "faster_reorgs_total", "Chain reorganisations handled", "counter", self.reorgs.load(Relaxed));
-        g(&mut o, "faster_rolled_back_blocks_total", "Blocks rolled back by reorgs", "counter", self.rolled_back.load(Relaxed));
+        g(
+            &mut o,
+            "faster_rolled_back_blocks_total",
+            "Blocks rolled back by reorgs",
+            "counter",
+            self.rolled_back.load(Relaxed),
+        );
         g(&mut o, "faster_ws_clients", "Connected WebSocket clients", "gauge", self.ws_clients.load(Relaxed));
-        g(&mut o, "faster_ws_dropped_slow_total", "WebSocket clients dropped for falling behind", "counter",
-            self.ws_dropped_slow.load(Relaxed));
-        g(&mut o, "faster_rate_limited_total", "Requests rejected by the rate limiter", "counter",
-            self.rate_limited.load(Relaxed));
-        let _ = writeln!(o, "# HELP faster_rpc_requests_total Node JSON-RPC requests\n# TYPE faster_rpc_requests_total counter");
+        g(
+            &mut o,
+            "faster_ws_dropped_slow_total",
+            "WebSocket clients dropped for falling behind",
+            "counter",
+            self.ws_dropped_slow.load(Relaxed),
+        );
+        g(
+            &mut o,
+            "faster_rate_limited_total",
+            "Requests rejected by the rate limiter",
+            "counter",
+            self.rate_limited.load(Relaxed),
+        );
+        let _ = writeln!(
+            o,
+            "# HELP faster_rpc_requests_total Node JSON-RPC requests\n# TYPE faster_rpc_requests_total counter"
+        );
         let _ = writeln!(o, "faster_rpc_requests_total{{result=\"ok\"}} {}", self.rpc_ok.load(Relaxed));
         let _ = writeln!(o, "faster_rpc_requests_total{{result=\"error\"}} {}", self.rpc_err.load(Relaxed));
-        let _ = writeln!(o, "# HELP faster_rpc_seconds Node JSON-RPC request latency\n# TYPE faster_rpc_seconds histogram");
+        let _ =
+            writeln!(o, "# HELP faster_rpc_seconds Node JSON-RPC request latency\n# TYPE faster_rpc_seconds histogram");
         self.rpc_latency.render(&mut o, "faster_rpc_seconds", "");
-        let _ = writeln!(o, "# HELP faster_commit_seconds Store commit latency\n# TYPE faster_commit_seconds histogram");
+        let _ =
+            writeln!(o, "# HELP faster_commit_seconds Store commit latency\n# TYPE faster_commit_seconds histogram");
         self.commit.render(&mut o, "faster_commit_seconds", "");
         let routes: Vec<(String, &'static Route)> =
             self.routes.lock().unwrap().iter().map(|(k, v)| (k.clone(), *v)).collect();
-        let _ = writeln!(o, "# HELP faster_http_requests_total HTTP requests\n# TYPE faster_http_requests_total counter");
+        let _ =
+            writeln!(o, "# HELP faster_http_requests_total HTTP requests\n# TYPE faster_http_requests_total counter");
         for (route, r) in &routes {
             for (i, c) in r.by_class.iter().enumerate() {
                 let v = c.load(Relaxed);

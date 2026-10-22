@@ -81,15 +81,17 @@ async fn main() -> Result<()> {
         rate: env("RATE_LIMIT_RPS", 100.0)?,
         burst: env("RATE_LIMIT_BURST", 200.0)?,
         trust_proxy: env("TRUST_PROXY_HEADERS", false)?,
-        cors_origins: env("CORS_ORIGINS", "*".to_string())?.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+        cors_origins: env("CORS_ORIGINS", "*".to_string())?
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
     };
     let max_ws_clients: usize = env("MAX_WS_CLIENTS", 10_000)?;
 
     std::fs::create_dir_all(&data_dir).with_context(|| format!("create {}", data_dir.display()))?;
-    let store = store::Store::open(
-        &data_dir.join("hot"),
-        store::StoreConfig { cache_bytes: cache_mb << 20, reorg_depth },
-    )?;
+    let store =
+        store::Store::open(&data_dir.join("hot"), store::StoreConfig { cache_bytes: cache_mb << 20, reorg_depth })?;
     let rpc = Arc::new(rpc::Rpc::new(&rpc_url, rpc_timeout)?);
     let status = Arc::new(Status::default());
     let hub = api::Hub::new(store.clone());
@@ -115,7 +117,8 @@ async fn main() -> Result<()> {
         },
     };
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-    let admin = tokio::net::TcpListener::bind(&admin_addr).await.with_context(|| format!("bind ADMIN_ADDR {admin_addr}"))?;
+    let admin =
+        tokio::net::TcpListener::bind(&admin_addr).await.with_context(|| format!("bind ADMIN_ADDR {admin_addr}"))?;
     let admin_app = api::admin_router(store.clone(), backup_dir);
     tokio::spawn(async move {
         if let Err(e) = axum::serve(admin, admin_app).await {

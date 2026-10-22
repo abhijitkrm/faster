@@ -49,11 +49,7 @@ struct ErrObj {
 
 impl Rpc {
     pub fn new(url: &str, timeout: Duration) -> anyhow::Result<Self> {
-        let http = reqwest::Client::builder()
-            .timeout(timeout)
-            .pool_max_idle_per_host(64)
-            .tcp_nodelay(true)
-            .build()?;
+        let http = reqwest::Client::builder().timeout(timeout).pool_max_idle_per_host(64).tcp_nodelay(true).build()?;
         Ok(Rpc { url: url.to_string(), http, block_receipts: AtomicBool::new(true) })
     }
 
@@ -176,10 +172,8 @@ impl Rpc {
                 Err(e) => return Err(e),
             }
         }
-        let calls: Vec<_> = numbers
-            .iter()
-            .map(|n| ("eth_getBlockByNumber", json!([format!("0x{n:x}"), true])))
-            .collect();
+        let calls: Vec<_> =
+            numbers.iter().map(|n| ("eth_getBlockByNumber", json!([format!("0x{n:x}"), true]))).collect();
         let res = self.batch(&calls).await?;
         let mut blocks = Vec::with_capacity(numbers.len());
         for (i, n) in numbers.iter().enumerate() {
@@ -191,9 +185,8 @@ impl Rpc {
             let calls: Vec<_> = chunk.iter().map(|h| ("eth_getTransactionReceipt", json!([h]))).collect();
             for (j, r) in self.batch(&calls).await?.into_iter().enumerate() {
                 match r.as_deref() {
-                    Some(v) if v.get() != "null" => receipts.push(
-                        serde_json::from_str(v.get()).map_err(|e| RpcError::Decode(format!("receipt: {e}")))?,
-                    ),
+                    Some(v) if v.get() != "null" => receipts
+                        .push(serde_json::from_str(v.get()).map_err(|e| RpcError::Decode(format!("receipt: {e}")))?),
                     _ => return Err(RpcError::NotReady(format!("receipt {}", chunk[j]))),
                 }
             }
@@ -312,11 +305,7 @@ fn u(s: &str, what: &str, n: u64) -> Result<u64, RpcError> {
 pub(crate) fn assemble(b: RpcBlock, rs: Vec<RpcReceipt>) -> Result<FullBlock, RpcError> {
     let n = u(&b.number, "number", 0)?;
     if rs.len() != b.transactions.len() {
-        return Err(RpcError::NotReady(format!(
-            "block {n}: {} receipts for {} txs",
-            rs.len(),
-            b.transactions.len()
-        )));
+        return Err(RpcError::NotReady(format!("block {n}: {} receipts for {} txs", rs.len(), b.transactions.len())));
     }
     let ts = u(&b.timestamp, "timestamp", n)?;
     let mut txs = Vec::with_capacity(b.transactions.len());

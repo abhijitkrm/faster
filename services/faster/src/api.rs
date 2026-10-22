@@ -455,7 +455,11 @@ async fn block_detail(State(s): State<AppState>, Path(id): Path<String>) -> Resu
     Ok(with_cache(cache_header(&s, b.number), v))
 }
 
-async fn block_txs(State(s): State<AppState>, Path(id): Path<String>, Query(q): Query<ListQ>) -> Result<Response, ApiError> {
+async fn block_txs(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<ListQ>,
+) -> Result<Response, ApiError> {
     let b = find_block(&s, &id)?;
     let limit = limit_or(&q, 100, 1000);
     let offset = q.offset.unwrap_or(0);
@@ -553,7 +557,9 @@ async fn address_detail(State(s): State<AppState>, Path(addr): Path<String>, Que
     let info = s.store.addr_info(&a)?;
     // `before` (keyset) costs the same at any depth; `page` skips entries.
     let txs = match q.before.as_deref() {
-        Some(c) => s.store.addr_txs_before(&a, Some(parse_cursor(c).ok_or(ApiError::BadRequest("Invalid cursor"))?), limit)?,
+        Some(c) => {
+            s.store.addr_txs_before(&a, Some(parse_cursor(c).ok_or(ApiError::BadRequest("Invalid cursor"))?), limit)?
+        }
         None => s.store.addr_txs(&a, (page - 1).saturating_mul(limit), limit)?,
     };
     let next_cursor = if txs.len() == limit { txs.last().map(cursor_of) } else { None };
@@ -600,9 +606,7 @@ pub fn admin_router(store: Arc<Store>, backup_dir: std::path::PathBuf) -> Router
     Router::new()
         .route(
             "/metrics",
-            get(|| async {
-                ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], crate::metrics::get().render())
-            }),
+            get(|| async { ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], crate::metrics::get().render()) }),
         )
         .route(
             "/admin/checkpoint",
@@ -613,8 +617,10 @@ pub fn admin_router(store: Arc<Store>, backup_dir: std::path::PathBuf) -> Router
                     let path = dir.join(format!("checkpoint-{now}"));
                     let p2 = path.clone();
                     match tokio::task::spawn_blocking(move || store.checkpoint(&p2)).await {
-                        Ok(Ok(head)) => Json(json!({"path": path.display().to_string(), "head": head.map(|h| h.number)}))
-                            .into_response(),
+                        Ok(Ok(head)) => {
+                            Json(json!({"path": path.display().to_string(), "head": head.map(|h| h.number)}))
+                                .into_response()
+                        }
                         Ok(Err(e)) => ApiError::Internal(e).into_response(),
                         Err(e) => ApiError::Internal(e.into()).into_response(),
                     }
