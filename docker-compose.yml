@@ -37,31 +37,35 @@ services:
     networks:
       - explorer-network
 
-  # Faster Indexer (replaces block-listener + indexer)
-  indexer:
+  # Faster: RocksDB hot store + chain indexer + explorer REST/WebSocket API in one process.
+  # Replaces fasterindexer + api-go for the explorer; /api/clob/* is proxied to api-go.
+  faster:
     build:
-      context: ./services/fasterindexer
+      context: ./services/faster
       dockerfile: Dockerfile
-    image: faster:indexer
-    container_name: faster-indexer
+    image: faster:faster
+    container_name: faster-faster
+    ports:
+      - "4000:3000"
     environment:
       RPC_URL: ${RPC_URL}
-      REDIS_URL: redis://redis:6379
-      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@postgresql:5432/${DB_NAME}
-      BATCH_SIZE: ${FASTERINDEXER_BATCH_SIZE:-1}
-      POLL_MS: ${FASTERINDEXER_POLL_MS:-1000}
-      RPS: ${FASTERINDEXER_RPS:-1}
+      PORT: 3000
+      DATA_DIR: /data
+      START_BLOCK: ${START_BLOCK:-0}
+      CONFIRMATIONS: ${CONFIRMATIONS:-0}
+      REORG_DEPTH: ${REORG_DEPTH:-256}
+      FETCH_BATCH: ${FETCH_BATCH:-10}
+      FETCH_CONCURRENCY: ${FETCH_CONCURRENCY:-8}
+      CACHE_MB: ${CACHE_MB:-512}
+      CLOB_API_URL: http://api:3000
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      START_BLOCK: ${START_BLOCK:-}
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgresql:
-        condition: service_healthy
+    volumes:
+      - faster-data:/data
+    stop_grace_period: 30s
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3102/health"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD", "curl", "-fs", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
       retries: 3
     restart: unless-stopped
     networks:
@@ -127,15 +131,14 @@ services:
     networks:
       - explorer-network
 
-  # API Service (Go)
+  # api-go: CLOB archive API (ClickHouse), reached through faster
   api:
     build:
       context: ./services/api-go
       dockerfile: Dockerfile
     image: faster:api
     container_name: faster-api
-    ports:
-      - "4000:3000"
+    # Internal only: serves /api/clob/* to faster until the CLOB API is ported.
     environment:
       DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@postgresql:5432/${DB_NAME}
       REDIS_URL: redis://redis:6379
@@ -172,7 +175,7 @@ services:
     ports:
       - "4001:5173"
     depends_on:
-      - api
+      - faster
     environment:
       NODE_ENV: ${NODE_ENV:-production}
     restart: unless-stopped
@@ -180,6 +183,8 @@ services:
       - explorer-network
 
 volumes:
+  faster-data:
+    driver: local
   postgres-data:
     driver: local
   redis-data:
