@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 const API = import.meta.env.VITE_API_URL || 'http://localhost:4000';
 
 // ── Type detection ────────────────────────────────────────────────────────────
-const RE_TX_OR_BLOCK_HASH = /^0x[0-9a-fA-F]{64}$/i;   // 32-byte hash (tx or block)
+const RE_TX_OR_BLOCK_HASH = /^0x[0-9a-fA-F]{64}$/i;   // 32-byte hash (tx, block or CLOB order)
 const RE_ADDRESS           = /^0x[0-9a-fA-F]{40}$/i;   // 20-byte address
 const RE_BLOCK_NUM         = /^\d+$/;                   // pure decimal → block number
 
@@ -19,7 +19,7 @@ function detect(raw) {
 
 const TYPE_LABELS = {
   address: { label: 'Address',   color: 'var(--blue)' },
-  hash32:  { label: 'Tx / Block hash', color: 'var(--purple)' },
+  hash32:  { label: 'Tx / Block / Order hash', color: 'var(--purple)' },
   block:   { label: 'Block #',   color: 'var(--green)' },
   unknown: { label: '?',         color: 'var(--text-3)' },
 };
@@ -69,6 +69,14 @@ export default function SearchBar() {
         if (res2.ok) {
           const blk = await res2.json();
           navigate(`/blocks/${blk.number ?? resolved.value}`);
+          setQuery('');
+          setStatus('idle');
+          return;
+        }
+        // Try a CLOB order / cancel / amend hash
+        const res3 = await fetch(`${API}/api/clob/orders/${resolved.value.toLowerCase()}`);
+        if (res3.ok) {
+          navigate(`/clob/order/${resolved.value.toLowerCase()}`);
           setQuery('');
           setStatus('idle');
           return;

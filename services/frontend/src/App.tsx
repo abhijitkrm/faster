@@ -7,6 +7,9 @@ import BlockDetail from './pages/BlockDetail';
 import TxDetail    from './pages/TxDetail';
 import Transactions from './pages/Transactions';
 import Address from './pages/Address';
+import ClobOrder from './pages/ClobOrder';
+import ClobTrader from './pages/ClobTrader';
+import ClobPair from './pages/ClobPair';
 import { useWS } from './context/WSContext';
 
 const fmtNum = (n) => (n == null ? '—' : Number(n).toLocaleString());
@@ -174,6 +177,9 @@ export default function App() {
             <Route path="/transactions"        element={<Transactions />} />
             <Route path="/tx/:hash"            element={<TxDetail />} />
             <Route path="/address/:address"    element={<Address />} />
+            <Route path="/clob/order/:hash"    element={<ClobOrder />} />
+            <Route path="/clob/trader/:addr"   element={<ClobTrader />} />
+            <Route path="/clob/pair/:id"       element={<ClobPair />} />
           </Routes>
         </div>
       </main>

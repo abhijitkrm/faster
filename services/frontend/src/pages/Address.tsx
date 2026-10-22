@@ -150,6 +150,7 @@ export default function Address() {
           fontSize: 10, fontWeight: 700, letterSpacing: '.1em', padding: '4px 10px',
           textTransform: 'uppercase', transition: 'all .15s', whiteSpace: 'nowrap',
         }}>{copied ? '✓ Copied' : 'Copy'}</button>
+        <Link to={`/clob/trader/${address}`} className="panel-link" style={{ whiteSpace: 'nowrap' }}>CLOB history →</Link>
       </div>
 
       {/* ── Stats cards ── */}

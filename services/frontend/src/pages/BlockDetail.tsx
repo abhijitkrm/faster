@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
+import ClobBlockSection from '../components/ClobBlockSection';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:4000';
 
@@ -55,6 +56,7 @@ export default function BlockDetail() {
       <div style={{ marginTop: 16 }}>
         <Link to="/blocks" className="nav-link" style={{ fontSize: 11 }}>← Back to blocks</Link>
       </div>
+      {/^\d+$/.test(number) && <div style={{ textAlign: 'left' }}><ClobBlockSection height={number} /></div>}
     </div>
   );
 
@@ -182,6 +184,8 @@ export default function BlockDetail() {
           )
         }
       </div>
+
+      <ClobBlockSection height={block.number} />
     </div>
   );
 }
