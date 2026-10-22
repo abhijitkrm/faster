@@ -70,6 +70,36 @@ Paging with cursors: pass the response's `next_cursor` (`"<block>:<index>"`)
 as `before=` to get the next page; `next_cursor` is null on the last page.
 This costs the same at any depth (0.16 ms at 100K deep vs 13 ms with `page=`).
 
+## Tokens
+
+ERC-20, ERC-721 and ERC-1155 transfers are decoded from logs (`Transfer`,
+`TransferSingle`, `TransferBatch`). Balances are derived from transfers, so
+they are exact when indexing starts at block 0 (`START_BLOCK=0`). Name,
+symbol and decimals are read from the contract once, when the token is first
+seen.
+
+| Endpoint | |
+|---|---|
+| `GET /api/tokens?limit=50&offset=0` | tokens by transfer count: `address, type, name, symbol, decimals, holders, transfers, first_block` |
+| `GET /api/tokens/{address}` | one token |
+| `GET /api/tokens/{address}/transfers?limit=25&before=` | its transfers, newest first |
+| `GET /api/tokens/{address}/holders?limit=50&offset=0` | largest holders (`value`: balance, or NFT count for ERC-721) |
+| `GET /api/addresses/{address}/token-transfers?limit=25&before=` | transfers in or out of an address |
+| `GET /api/addresses/{address}/tokens` | tokens held (`value`, and `token_id` for ERC-1155) |
+
+Transfer fields: `block_number`, `block_timestamp`, `transaction_hash`,
+`log_index`, `batch_index` (position in an ERC-1155 batch), `token`,
+`token_type`, `token_symbol`, `token_decimals`, `from_address`, `to_address`,
+`token_id`, `value` (raw integer string), `cursor`. Lists return
+`{"items": [...], "next_cursor": ...}`; pass `next_cursor` as `before=`.
+`GET /api/transactions/{hash}` includes `token_transfers`.
+
+## Search
+
+`GET /api/search?q=` resolves a block number, transaction or block hash,
+address (`type: "token"` if it is a token contract) or token name / symbol
+prefix: `[{"type": "block" | "transaction" | "address" | "token", "value": ...}]`.
+
 ## Stats and health
 
 `GET /stats`:

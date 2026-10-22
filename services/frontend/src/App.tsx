@@ -7,6 +7,8 @@ import BlockDetail from './pages/BlockDetail';
 import TxDetail    from './pages/TxDetail';
 import Transactions from './pages/Transactions';
 import Accounts from './pages/Accounts';
+import Tokens from './pages/Tokens';
+import Token from './pages/Token';
 import Address from './pages/Address';
 import ClobOrder from './pages/ClobOrder';
 import ClobTrader from './pages/ClobTrader';
@@ -124,6 +126,7 @@ export default function App() {
               <Link to="/"             className={'nav-link' + va('/')}>Home</Link>
               <Link to="/blocks"       className={'nav-link' + va('/blocks')}>Blocks</Link>
               <Link to="/transactions" className={'nav-link' + va('/transactions')}>Txns</Link>
+              <Link to="/tokens"       className={'nav-link' + va('/tokens')}>Tokens</Link>
               <Link to="/accounts"     className={'nav-link' + va('/accounts')}>Accounts</Link>
               <button
                 onClick={toggleTheme}
@@ -183,6 +186,8 @@ export default function App() {
             <Route path="/clob/trader/:addr"   element={<ClobTrader />} />
             <Route path="/clob/pair/:id"       element={<ClobPair />} />
             <Route path="/accounts"            element={<Accounts />} />
+            <Route path="/tokens"              element={<Tokens />} />
+            <Route path="/token/:address"      element={<Token />} />
             <Route path="*"                    element={<div className="empty" style={{ paddingTop: 60 }}>Page not found.</div>} />
           </Routes>
         </div>

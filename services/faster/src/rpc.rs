@@ -56,6 +56,12 @@ impl Rpc {
     /// Sends one JSON-RPC batch and returns each call's raw result in request
     /// order. A per-call error fails the whole batch.
     async fn batch(&self, calls: &[(&str, Value)]) -> Result<Vec<Option<Box<RawValue>>>, RpcError> {
+        self.batch_with(calls, false).await
+    }
+
+    /// `lenient`: a per-call error yields None for that call instead of
+    /// failing the batch (e.g. eth_call reverts).
+    async fn batch_with(&self, calls: &[(&str, Value)], lenient: bool) -> Result<Vec<Option<Box<RawValue>>>, RpcError> {
         let reqs: Vec<Value> = calls
             .iter()
             .enumerate()
@@ -97,7 +103,13 @@ impl Rpc {
         let mut seen = 0;
         for r in resps {
             if let Some(e) = r.error {
-                return Err(RpcError::Rpc { code: e.code, message: e.message });
+                if !lenient {
+                    return Err(RpcError::Rpc { code: e.code, message: e.message });
+                }
+                if (r.id as usize) < out.len() {
+                    seen += 1;
+                }
+                continue;
             }
             let i = r.id as usize;
             if i < out.len() {
@@ -131,6 +143,15 @@ impl Rpc {
             }
             _ => Ok(None),
         }
+    }
+
+    /// eth_call of each calldata against `to` at latest; None per failed call.
+    pub async fn calls(&self, to: &str, datas: &[&str]) -> Result<Vec<Option<Vec<u8>>>, RpcError> {
+        let calls: Vec<_> = datas.iter().map(|d| ("eth_call", json!([{"to": to, "data": d}, "latest"]))).collect();
+        let r = self.batch_with(&calls, true).await?;
+        Ok(r.into_iter()
+            .map(|v| v.and_then(|v| serde_json::from_str::<String>(v.get()).ok()).and_then(|s| parse_hex_bytes(&s)))
+            .collect())
     }
 
     pub async fn balance(&self, addr: &str) -> Result<Vec<u8>, RpcError> {

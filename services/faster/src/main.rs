@@ -12,6 +12,7 @@ mod indexer;
 mod metrics;
 mod rpc;
 mod store;
+mod tokens;
 mod types;
 
 use std::path::PathBuf;
@@ -129,7 +130,9 @@ async fn main() -> Result<()> {
     tokio::spawn(limiter.clone().sweep());
     tracing::info!(port, admin = %admin_addr, rpc = %rpc_url, data = %data_dir.display(), ?icfg, "faster starting");
 
-    let idx = indexer::Indexer { store, rpc, cfg: icfg, sink: hub.clone(), status };
+    let (tok_tx, tok_rx) = tokio::sync::mpsc::channel(100_000);
+    tokio::spawn(indexer::token_meta_worker(store.clone(), rpc.clone(), tok_rx));
+    let idx = indexer::Indexer { store, rpc, cfg: icfg, sink: hub.clone(), status, new_tokens: tok_tx };
     let indexer = tokio::spawn(idx.run());
     tokio::spawn(hub.clone().heartbeat());
     let app = api::router(state, limiter).into_make_service_with_connect_info::<std::net::SocketAddr>();

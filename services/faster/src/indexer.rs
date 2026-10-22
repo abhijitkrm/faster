@@ -42,6 +42,8 @@ pub struct Indexer {
     pub cfg: IndexerConfig,
     pub sink: Arc<dyn Sink>,
     pub status: Arc<Status>,
+    /// Newly seen token contracts, for the metadata fetcher.
+    pub new_tokens: tokio::sync::mpsc::Sender<crate::types::Addr>,
 }
 
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
@@ -169,7 +171,12 @@ impl Indexer {
         let store = self.store.clone();
         let t = Instant::now();
         let tip = Some(self.status.tip.load(Ordering::Relaxed));
-        let blocks = tokio::task::spawn_blocking(move || store.apply_at(&blocks, tip).map(|_| blocks)).await??;
+        let (blocks, new_tokens) =
+            tokio::task::spawn_blocking(move || store.apply_at(&blocks, tip).map(|t| (blocks, t))).await??;
+        for tok in new_tokens {
+            // Metadata is best-effort; a full queue is caught by the startup scan.
+            let _ = self.new_tokens.try_send(tok);
+        }
         let txs: usize = blocks.iter().map(|b| b.txs.len()).sum();
         tracing::debug!(blocks = blocks.len(), txs, ms = t.elapsed().as_millis() as u64, "commit");
         let last = blocks.last().unwrap().block.number;
@@ -237,6 +244,43 @@ where
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
+}
+
+/// Fetches name / symbol / decimals for new tokens (eth_call, one batch per
+/// token, each call allowed to fail independently).
+pub async fn token_meta_worker(
+    store: Arc<Store>,
+    rpc: Arc<Rpc>,
+    mut rx: tokio::sync::mpsc::Receiver<crate::types::Addr>,
+) {
+    if let Ok(missing) = store.tokens_missing_meta(100_000) {
+        for a in missing {
+            fetch_meta(&store, &rpc, a).await;
+        }
+    }
+    while let Some(a) = rx.recv().await {
+        fetch_meta(&store, &rpc, a).await;
+    }
+}
+
+async fn fetch_meta(store: &Store, rpc: &Rpc, a: crate::types::Addr) {
+    // name(), symbol(), decimals()
+    let datas = ["0x06fdde03", "0x95d89b41", "0x313ce567"];
+    let to = crate::types::hex0x(&a);
+    match tokio::time::timeout(Duration::from_secs(10), rpc.calls(&to, &datas)).await {
+        Ok(Ok(r)) => {
+            let m = crate::store::TokenMeta {
+                name: r[0].as_deref().and_then(crate::tokens::decode_string),
+                symbol: r[1].as_deref().and_then(crate::tokens::decode_string),
+                decimals: r[2].as_deref().and_then(crate::tokens::decode_decimals),
+            };
+            if let Err(e) = store.put_token_meta(&a, &m) {
+                tracing::error!(token = %to, err = %e, "store token metadata");
+            }
+        }
+        Ok(Err(e)) => tracing::warn!(token = %to, err = %e, "token metadata"),
+        Err(_) => tracing::warn!(token = %to, "token metadata timed out"),
     }
 }
 

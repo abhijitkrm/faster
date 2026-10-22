@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 
 import { API } from '../config';
+import { TransfersTable } from '../tokens';
 
 const fmtNum   = (n) => (n == null ? '—' : Number(n).toLocaleString());
 const fmtEth   = (wei) => { try { return (Number(BigInt(wei)) / 1e18).toFixed(6); } catch { return '0.000000'; } };
@@ -234,6 +235,19 @@ export default function TxDetail() {
           </Row>
         )}
       </div>
+
+      {/* Token transfers */}
+      {tx.token_transfers && tx.token_transfers.length > 0 && (
+        <>
+          <div className="page-head">
+            <span className="page-title">Token Transfers</span>
+            <span className="page-count">{tx.token_transfers.length}</span>
+          </div>
+          <div className="panel" style={{ marginBottom: 18 }}>
+            <TransfersTable items={tx.token_transfers} />
+          </div>
+        </>
+      )}
 
       {/* Logs */}
       {tx.logs && tx.logs.length > 0 && (

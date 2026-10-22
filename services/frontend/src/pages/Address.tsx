@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 
 import { API } from '../config';
+import AddressTokens from '../components/AddressTokens';
 
 const fmtNum   = (n) => (n == null ? '—' : Number(n).toLocaleString());
 const fmtEth   = (wei) => { try { return (Number(BigInt(wei)) / 1e18).toFixed(6); } catch { return '0.000000'; } };
@@ -379,6 +380,8 @@ export default function Address() {
           )
         }
       </div>
+
+      <AddressTokens address={address} />
     </div>
   );
 }

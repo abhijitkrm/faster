@@ -382,6 +382,13 @@ pub fn router(state: AppState, limiter: Arc<crate::guard::Limiter>) -> Router {
         .route("/api/addresses", get(addresses_list))
         .route("/api/addresses/search/by-pattern", get(addresses_search))
         .route("/api/addresses/{addr}", get(address_detail))
+        .route("/api/tokens", get(tokens_list))
+        .route("/api/tokens/{addr}", get(token_detail))
+        .route("/api/tokens/{addr}/transfers", get(token_transfers))
+        .route("/api/tokens/{addr}/holders", get(token_holders))
+        .route("/api/addresses/{addr}/token-transfers", get(address_token_transfers))
+        .route("/api/addresses/{addr}/tokens", get(address_tokens))
+        .route("/api/search", get(search))
         .route("/api/clob/stats", get(crate::clob::stats))
         .route("/api/clob/orders/{hash}", get(crate::clob::item_by_hash))
         .route("/api/clob/traders/{addr}/{kind}", get(crate::clob::trader_list))
@@ -510,6 +517,10 @@ async fn tx_detail(State(s): State<AppState>, Path(hash): Path<String>) -> Resul
         })
         .collect();
     v["logs"] = Value::Array(logs);
+    let mut ctx = TokenCtx::default();
+    let tts = s.store.tx_transfers(&t)?;
+    v["token_transfers"] =
+        Value::Array(tts.iter().map(|tr| transfer_json(&s, &mut ctx, t.block_number, tr)).collect::<Result<_, _>>()?);
     Ok(with_cache(cache_header(&s, t.block_number), v))
 }
 
@@ -596,6 +607,172 @@ async fn address_detail(State(s): State<AppState>, Path(addr): Path<String>, Que
         "limit": limit,
         "next_cursor": next_cursor,
     })))
+}
+
+// ---- tokens ----
+
+fn kind_name(k: u8) -> &'static str {
+    match k {
+        crate::tokens::KIND_ERC20 => "ERC-20",
+        crate::tokens::KIND_ERC721 => "ERC-721",
+        crate::tokens::KIND_ERC1155 => "ERC-1155",
+        _ => "unknown",
+    }
+}
+
+fn token_json(a: &Addr, st: &crate::store::TokenStats, m: &crate::store::TokenMeta) -> Value {
+    json!({
+        "address": hex0x(a),
+        "type": kind_name(st.kind),
+        "name": m.name,
+        "symbol": m.symbol,
+        "decimals": m.decimals,
+        "holders": st.holders,
+        "transfers": st.transfers,
+        "first_block": st.first_block,
+    })
+}
+
+/// Per-request caches of token metadata and block timestamps.
+#[derive(Default)]
+struct TokenCtx {
+    meta: std::collections::HashMap<Addr, Option<(crate::store::TokenStats, crate::store::TokenMeta)>>,
+    ts: std::collections::HashMap<u64, u64>,
+}
+
+fn transfer_json(s: &AppState, ctx: &mut TokenCtx, n: u64, t: &crate::tokens::Transfer) -> Result<Value, ApiError> {
+    if !ctx.meta.contains_key(&t.token) {
+        ctx.meta.insert(t.token, s.store.token(&t.token)?);
+    }
+    if !ctx.ts.contains_key(&n) {
+        ctx.ts.insert(n, s.store.block(n)?.map_or(0, |b| b.timestamp));
+    }
+    let tx_hash = s.store.tx(n, t.tx_index)?.map(|x| hex0x(&x.hash));
+    let m = ctx.meta[&t.token].as_ref().map(|(_, m)| m.clone()).unwrap_or_default();
+    Ok(json!({
+        "block_number": n,
+        "block_timestamp": ctx.ts[&n],
+        "transaction_hash": tx_hash,
+        "log_index": t.log_index,
+        "batch_index": t.sub,
+        "token": hex0x(&t.token),
+        "token_type": kind_name(t.kind),
+        "token_symbol": m.symbol,
+        "token_decimals": m.decimals,
+        "from_address": hex0x(&t.from),
+        "to_address": hex0x(&t.to),
+        "token_id": t.token_id.as_ref().map(|i| dec(i)),
+        "value": dec(&t.value),
+        "cursor": format!("{n}:{}:{}", t.log_index, t.sub),
+    }))
+}
+
+fn parse_tt_cursor(c: &Option<String>) -> Result<Option<(u64, u32, u16)>, ApiError> {
+    let Some(c) = c.as_deref() else { return Ok(None) };
+    let mut it = c.split(':');
+    let r = (|| Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next().unwrap_or("0").parse().ok()?)))();
+    r.map(Some).ok_or(ApiError::BadRequest("Invalid cursor"))
+}
+
+fn transfers_page(s: &AppState, a: &Addr, by_token: bool, q: &ListQ) -> ApiResult {
+    let limit = limit_or(q, 25, 100);
+    let rows = s.store.transfers_by(a, by_token, parse_tt_cursor(&q.before)?, limit)?;
+    let mut ctx = TokenCtx::default();
+    let items: Vec<Value> = rows.iter().map(|(n, t)| transfer_json(s, &mut ctx, *n, t)).collect::<Result<_, _>>()?;
+    let next = if items.len() == limit { items.last().map(|v| v["cursor"].clone()) } else { None };
+    Ok(Json(json!({"items": items, "next_cursor": next})))
+}
+
+async fn tokens_list(State(s): State<AppState>, Query(q): Query<ListQ>) -> ApiResult {
+    let l = limit_or(&q, 50, 100);
+    let rows = s.store.top_tokens(q.offset.unwrap_or(0).min(100_000), l)?;
+    Ok(Json(Value::Array(rows.iter().map(|(a, st, m)| token_json(a, st, m)).collect())))
+}
+
+async fn token_detail(State(s): State<AppState>, Path(addr): Path<String>) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    let (st, m) = s.store.token(&a)?.ok_or(ApiError::NotFound("Token not found"))?;
+    Ok(Json(token_json(&a, &st, &m)))
+}
+
+async fn token_transfers(State(s): State<AppState>, Path(addr): Path<String>, Query(q): Query<ListQ>) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    transfers_page(&s, &a, true, &q)
+}
+
+async fn address_token_transfers(
+    State(s): State<AppState>,
+    Path(addr): Path<String>,
+    Query(q): Query<ListQ>,
+) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    transfers_page(&s, &a, false, &q)
+}
+
+async fn token_holders(State(s): State<AppState>, Path(addr): Path<String>, Query(q): Query<ListQ>) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    let l = limit_or(&q, 50, 100);
+    let rows = s.store.token_holders(&a, q.offset.unwrap_or(0).min(100_000), l)?;
+    Ok(Json(Value::Array(rows.iter().map(|(h, v)| json!({"address": hex0x(h), "value": dec(v)})).collect())))
+}
+
+async fn address_tokens(State(s): State<AppState>, Path(addr): Path<String>) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    let rows = s.store.holder_tokens(&a, 500)?;
+    let mut ctx = TokenCtx::default();
+    let mut out = Vec::with_capacity(rows.len());
+    for (tok, id, v) in rows {
+        if !ctx.meta.contains_key(&tok) {
+            ctx.meta.insert(tok, s.store.token(&tok)?);
+        }
+        let Some((st, m)) = &ctx.meta[&tok] else { continue };
+        let mut j = token_json(&tok, st, m);
+        j["token_id"] = json!(id.as_ref().map(|i| dec(i)));
+        j["value"] = json!(dec(&v));
+        out.push(j);
+    }
+    Ok(Json(Value::Array(out)))
+}
+
+#[derive(Deserialize)]
+pub struct SearchQ {
+    q: Option<String>,
+}
+
+/// Resolves a query to what it names: block number, tx / block hash,
+/// address (token or account), or token name / symbol prefix.
+async fn search(State(s): State<AppState>, Query(q): Query<SearchQ>) -> ApiResult {
+    let q = q.q.unwrap_or_default();
+    let q = q.trim();
+    let mut out: Vec<Value> = Vec::new();
+    if !q.is_empty() && q.len() <= 80 {
+        if let Ok(n) = q.parse::<u64>() {
+            if s.store.block(n)?.is_some() {
+                out.push(json!({"type": "block", "value": n.to_string()}));
+            }
+        } else if let Some(h) = parse_fixed::<32>(q) {
+            if s.store.tx_by_hash(&h)?.is_some() {
+                out.push(json!({"type": "transaction", "value": hex0x(&h)}));
+            }
+            if let Some(b) = s.store.block_by_hash(&h)? {
+                out.push(json!({"type": "block", "value": b.number.to_string()}));
+            }
+        } else if let Some(a) = parse_fixed::<20>(q) {
+            let t = if s.store.token(&a)?.is_some() { "token" } else { "address" };
+            out.push(json!({"type": t, "value": hex0x(&a)}));
+        } else if q.len() >= 2 {
+            for a in s.store.search_tokens(q, 10)? {
+                if let Some((st, m)) = s.store.token(&a)? {
+                    let mut j = token_json(&a, &st, &m);
+                    j["token_type"] = j["type"].take();
+                    j["type"] = json!("token");
+                    j["value"] = json!(hex0x(&a));
+                    out.push(j);
+                }
+            }
+        }
+    }
+    Ok(Json(Value::Array(out)))
 }
 
 // ---- admin (internal listener) ----

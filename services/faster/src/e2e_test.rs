@@ -187,6 +187,7 @@ async fn follows_chain_through_null_blocks_missing_receipts_and_reorgs() {
         },
         sink: sink.clone(),
         status: Arc::new(Status::default()),
+        new_tokens: tokio::sync::mpsc::channel(16).0,
     };
     let task = tokio::spawn(idx.run());
 

@@ -11,7 +11,22 @@
 //! | logs       | number u64 ‖ log index u32       | LogRec                   |
 //! | addr_tx    | addr 20 ‖ ^number u64 ‖ ^idx u32 | role bits u8             |
 //! | addr       | addr 20                          | AddrInfo                 |
-//! | undo       | number u64                       | Undo (prior addr/counter state) |
+//! | undo       | number u64                       | Undo (prior addr/counter/token state) |
+//! | addr_rank  | ^tx_count u64 ‖ addr 20          | (empty)                  |
+//! | tt         | number u64 ‖ log u32 ‖ sub u16   | token Transfer           |
+//! | tt_token   | token 20 ‖ ^number ‖ ^log ‖ ^sub | (empty)                  |
+//! | tt_addr    | addr 20 ‖ ^number ‖ ^log ‖ ^sub  | (empty)                  |
+//! | bal        | token 20 ‖ holder 20 ‖ id 32     | amount (min. big-endian) |
+//! | bal_rank   | token 20 ‖ ^amount 32 ‖ holder 20 | (empty); id 0 only      |
+//! | holder_tok | holder 20 ‖ token 20 ‖ id 32     | (empty) while amount > 0 |
+//! | token      | token 20                         | TokenStats               |
+//! | token_rank | ^transfers u64 ‖ token 20        | (empty)                  |
+//! | token_meta | token 20                         | TokenMeta (not reorg-tracked) |
+//! | token_name | lowercase name/symbol ‖ 0 ‖ token | (empty), for search     |
+//!
+//! Token balances are derived from transfers (ERC-20 amount, ERC-721 count
+//! of NFTs held, ERC-1155 amount per id), so they are exact only when
+//! indexing starts at the token's first transfer (START_BLOCK=0).
 //!
 //! Every block — its rows, address updates, counters, undo record and the
 //! head pointer — is written in one atomic WriteBatch, so the head is always
@@ -31,7 +46,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::*;
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 pub const ROLE_FROM: u8 = 1;
 pub const ROLE_TO: u8 = 2;
@@ -47,15 +62,139 @@ const CF_ADDR_TX: &str = "addr_tx";
 const CF_ADDR: &str = "addr";
 const CF_UNDO: &str = "undo";
 const CF_ADDR_RANK: &str = "addr_rank";
-const CFS: [&str; 10] =
-    [CF_META, CF_BLOCKS, CF_BLOCK_HASH, CF_TXS, CF_TX_HASH, CF_LOGS, CF_ADDR_TX, CF_ADDR, CF_UNDO, CF_ADDR_RANK];
+const CF_TT: &str = "tt";
+const CF_TT_TOKEN: &str = "tt_token";
+const CF_TT_ADDR: &str = "tt_addr";
+const CF_BAL: &str = "bal";
+const CF_BAL_RANK: &str = "bal_rank";
+const CF_HOLDER_TOK: &str = "holder_tok";
+const CF_TOKEN: &str = "token";
+const CF_TOKEN_RANK: &str = "token_rank";
+const CF_TOKEN_META: &str = "token_meta";
+const CF_TOKEN_NAME: &str = "token_name";
+const CFS: [&str; 20] = [
+    CF_META,
+    CF_BLOCKS,
+    CF_BLOCK_HASH,
+    CF_TXS,
+    CF_TX_HASH,
+    CF_LOGS,
+    CF_ADDR_TX,
+    CF_ADDR,
+    CF_UNDO,
+    CF_ADDR_RANK,
+    CF_TT,
+    CF_TT_TOKEN,
+    CF_TT_ADDR,
+    CF_BAL,
+    CF_BAL_RANK,
+    CF_HOLDER_TOK,
+    CF_TOKEN,
+    CF_TOKEN_RANK,
+    CF_TOKEN_META,
+    CF_TOKEN_NAME,
+];
 
 #[derive(Serialize, Deserialize, Default)]
 struct Undo {
     counters: Counters,
     /// State of every address the block touched, before the block.
     addrs: Vec<(Addr, Option<AddrInfo>)>,
+    /// Token balances (bal keys) the block changed, before the block.
+    bals: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    tokens: Vec<(Addr, Option<TokenStats>)>,
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenStats {
+    pub kind: u8,
+    pub transfers: u64,
+    /// Holders with a non-zero balance ((holder, id) pairs for ERC-1155).
+    pub holders: u64,
+    pub first_block: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenMeta {
+    pub name: Option<String>,
+    pub symbol: Option<String>,
+    pub decimals: Option<u8>,
+}
+
+/// Transfer position key: block, log index, position in an ERC-1155 batch.
+pub fn k_tt(n: u64, log: u32, sub: u16) -> [u8; 14] {
+    let mut k = [0u8; 14];
+    k[..8].copy_from_slice(&n.to_be_bytes());
+    k[8..12].copy_from_slice(&log.to_be_bytes());
+    k[12..].copy_from_slice(&sub.to_be_bytes());
+    k
+}
+
+/// Newest-first transfer index under a 20-byte prefix (token or address).
+pub fn k_tt_by(a: &Addr, n: u64, log: u32, sub: u16) -> [u8; 34] {
+    let mut k = [0u8; 34];
+    k[..20].copy_from_slice(a);
+    k[20..28].copy_from_slice(&(!n).to_be_bytes());
+    k[28..32].copy_from_slice(&(!log).to_be_bytes());
+    k[32..].copy_from_slice(&(!sub).to_be_bytes());
+    k
+}
+
+fn id32(id: &Option<Vec<u8>>) -> [u8; 32] {
+    let mut w = [0u8; 32];
+    if let Some(b) = id {
+        let b = &b[b.len().saturating_sub(32)..];
+        w[32 - b.len()..].copy_from_slice(b);
+    }
+    w
+}
+
+/// bal key for a transfer side. ERC-20 and ERC-721 use id 0 (721 counts
+/// NFTs held); ERC-1155 keeps one balance per id.
+fn k_bal(token: &Addr, holder: &Addr, kind: u8, id: &Option<Vec<u8>>) -> Vec<u8> {
+    let mut k = Vec::with_capacity(72);
+    k.extend_from_slice(token);
+    k.extend_from_slice(holder);
+    k.extend_from_slice(&if kind == crate::tokens::KIND_ERC1155 { id32(id) } else { [0u8; 32] });
+    k
+}
+
+fn u256(b: &[u8]) -> ruint::aliases::U256 {
+    ruint::aliases::U256::try_from_be_slice(&b[b.len().saturating_sub(32)..]).unwrap_or_default()
+}
+
+fn min_bytes(v: ruint::aliases::U256) -> Vec<u8> {
+    let b: [u8; 32] = v.to_be_bytes();
+    let lead = b.iter().take_while(|&&x| x == 0).count();
+    b[lead..].to_vec()
+}
+
+/// bal_rank key (only for id-0 balances): token ‖ ^amount ‖ holder.
+fn k_bal_rank(bal_key: &[u8], amount: &[u8]) -> Option<Vec<u8>> {
+    if bal_key[40..].iter().any(|&b| b != 0) {
+        return None;
+    }
+    let a: [u8; 32] = u256(amount).to_be_bytes();
+    let mut k = Vec::with_capacity(72);
+    k.extend_from_slice(&bal_key[..20]);
+    k.extend(a.iter().map(|b| !b));
+    k.extend_from_slice(&bal_key[20..40]);
+    Some(k)
+}
+
+fn k_holder_tok(bal_key: &[u8]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(72);
+    k.extend_from_slice(&bal_key[20..40]);
+    k.extend_from_slice(&bal_key[..20]);
+    k.extend_from_slice(&bal_key[40..]);
+    k
+}
+
+fn k_token_rank(transfers: u64, token: &Addr) -> [u8; 28] {
+    k_rank(transfers, token)
+}
+
+const ZERO: Addr = [0u8; 20];
 
 pub struct Store {
     db: DB,
@@ -125,6 +264,48 @@ fn tx_parties(t: &TxRec) -> Vec<(Addr, u8)> {
         add(c, ROLE_CREATED);
     }
     v
+}
+
+/// Index of block `n` in a run of consecutive blocks.
+fn blocks_index(blocks: &[FullBlock], n: u64) -> usize {
+    (n - blocks[0].block.number) as usize
+}
+
+/// A write to a derived index (rankings, holder→token). Derived entries are
+/// written before the state batch from parallel threads; readers check them
+/// against the authoritative records, so a stale entry is never served.
+type DerivedOp = (&'static str, Vec<u8>, bool); // (cf, key, put = true / delete = false)
+
+/// A balance change `old -> new` (None = zero): the balance itself goes in
+/// `wb`; its holder-rank and holder-token entries go to `idx`.
+fn write_bal(
+    wb: &mut WriteBatch,
+    cf_bal: &ColumnFamily,
+    idx: &mut Vec<DerivedOp>,
+    k: &[u8],
+    old: Option<&[u8]>,
+    new: Option<&[u8]>,
+) {
+    if let Some(o) = old {
+        if let Some(r) = k_bal_rank(k, o) {
+            idx.push((CF_BAL_RANK, r, false));
+        }
+    }
+    match new {
+        Some(n) => {
+            wb.put_cf(cf_bal, k, n);
+            if let Some(r) = k_bal_rank(k, n) {
+                idx.push((CF_BAL_RANK, r, true));
+            }
+            if old.is_none() {
+                idx.push((CF_HOLDER_TOK, k_holder_tok(k), true));
+            }
+        }
+        None => {
+            wb.delete_cf(cf_bal, k);
+            idx.push((CF_HOLDER_TOK, k_holder_tok(k), false));
+        }
+    }
 }
 
 impl Store {
@@ -223,34 +404,71 @@ impl Store {
     /// the rows, so they are invisible.
     #[cfg(test)]
     pub fn apply(&self, blocks: &[FullBlock]) -> Result<()> {
-        self.apply_at(blocks, None)
+        self.apply_at(blocks, None).map(|_| ())
     }
 
     /// `apply` for an indexer that knows the node's tip: blocks already more
     /// than REORG_DEPTH below it can never be rolled back, so they get no
     /// undo record (most of the state write during a catch-up).
-    pub fn apply_at(&self, blocks: &[FullBlock], tip: Option<u64>) -> Result<()> {
-        let Some(last) = blocks.last() else { return Ok(()) };
+    /// Returns tokens seen for the first time in these blocks.
+    pub fn apply_at(&self, blocks: &[FullBlock], tip: Option<u64>) -> Result<Vec<Addr>> {
+        let Some(last) = blocks.last() else { return Ok(Vec::new()) };
         let t = std::time::Instant::now();
         // The state batch is built while the data rows are written, but is
         // only written after them (see above).
+        let transfers: Vec<Vec<crate::tokens::Transfer>> = blocks.iter().map(crate::tokens::decode_block).collect();
         let (data, state) = std::thread::scope(|sc| {
-            let st = sc.spawn(|| self.build_state(blocks, tip));
-            let d = self.write_data(blocks);
+            let st = sc.spawn(|| self.build_state(blocks, &transfers, tip));
+            let d = self.write_data(blocks, &transfers);
             (d, st.join())
         });
         data?;
-        let wb = state.map_err(|_| anyhow!("state builder panicked"))??;
+        let (wb, derived, new_tokens) = state.map_err(|_| anyhow!("state builder panicked"))??;
+        self.write_derived(derived)?;
         let data_ms = t.elapsed().as_millis() as u64;
         let mut wo = WriteOptions::default();
         wo.set_sync(true);
         self.db.write_opt(wb, &wo)?;
         *self.head.write().unwrap() = Some(Head { number: last.block.number, hash: last.block.hash });
         tracing::debug!(blocks = blocks.len(), data_ms, state_ms = t.elapsed().as_millis() as u64 - data_ms, "apply");
-        Ok(())
+        Ok(new_tokens)
     }
 
-    fn write_data(&self, blocks: &[FullBlock]) -> Result<()> {
+    /// Derived-index writes, one thread per column family, no fsync (the
+    /// state batch that follows makes them durable).
+    fn write_derived(&self, ops: Vec<DerivedOp>) -> Result<()> {
+        let mut by_cf: HashMap<&'static str, Vec<(Vec<u8>, bool)>> = HashMap::new();
+        for (cf, k, put) in ops {
+            by_cf.entry(cf).or_default().push((k, put));
+        }
+        let mut nosync = WriteOptions::default();
+        nosync.set_sync(false);
+        let results: Vec<Result<()>> = std::thread::scope(|sc| {
+            let hs: Vec<_> = by_cf
+                .iter()
+                .map(|(cf, ops)| {
+                    let nosync = &nosync;
+                    sc.spawn(move || -> Result<()> {
+                        let cf = self.cf(cf);
+                        let mut wb = WriteBatch::default();
+                        for (k, put) in ops {
+                            if *put {
+                                wb.put_cf(cf, k, []);
+                            } else {
+                                wb.delete_cf(cf, k);
+                            }
+                        }
+                        self.db.write_opt(wb, nosync)?;
+                        Ok(())
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow!("writer thread panicked")))).collect()
+        });
+        results.into_iter().collect()
+    }
+
+    fn write_data(&self, blocks: &[FullBlock], transfers: &[Vec<crate::tokens::Transfer>]) -> Result<()> {
         let mut nosync = WriteOptions::default();
         nosync.set_sync(false);
         let write = |fill: &dyn Fn(&mut WriteBatch)| -> Result<()> {
@@ -317,6 +535,35 @@ impl Store {
                 }
             }));
         }
+        // Token transfers: one writer per index.
+        let (cf_tt, cf_ttt, cf_tta) = (self.cf(CF_TT), self.cf(CF_TT_TOKEN), self.cf(CF_TT_ADDR));
+        jobs.push(Box::new(move |wb: &mut WriteBatch| {
+            for (fb, ts) in blocks.iter().zip(transfers) {
+                for t in ts {
+                    wb.put_cf(cf_tt, k_tt(fb.block.number, t.log_index, t.sub), enc(t));
+                }
+            }
+        }));
+        jobs.push(Box::new(move |wb: &mut WriteBatch| {
+            for (fb, ts) in blocks.iter().zip(transfers) {
+                for t in ts {
+                    wb.put_cf(cf_ttt, k_tt_by(&t.token, fb.block.number, t.log_index, t.sub), []);
+                }
+            }
+        }));
+        jobs.push(Box::new(move |wb: &mut WriteBatch| {
+            for (fb, ts) in blocks.iter().zip(transfers) {
+                let n = fb.block.number;
+                for t in ts {
+                    if t.from != ZERO {
+                        wb.put_cf(cf_tta, k_tt_by(&t.from, n, t.log_index, t.sub), []);
+                    }
+                    if t.to != ZERO && t.to != t.from {
+                        wb.put_cf(cf_tta, k_tt_by(&t.to, n, t.log_index, t.sub), []);
+                    }
+                }
+            }
+        }));
         let results: Vec<Result<()>> = std::thread::scope(|sc| {
             let hs: Vec<_> = jobs.iter().map(|j| sc.spawn(|| write(j.as_ref()))).collect();
             hs.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow!("writer thread panicked")))).collect()
@@ -324,8 +571,14 @@ impl Store {
         results.into_iter().collect()
     }
 
-    fn build_state(&self, blocks: &[FullBlock], tip: Option<u64>) -> Result<WriteBatch> {
-        let Some(last) = blocks.last() else { return Ok(WriteBatch::default()) };
+    fn build_state(
+        &self,
+        blocks: &[FullBlock],
+        transfers: &[Vec<crate::tokens::Transfer>],
+        tip: Option<u64>,
+    ) -> Result<(WriteBatch, Vec<DerivedOp>, Vec<Addr>)> {
+        let Some(last) = blocks.last() else { return Ok((WriteBatch::default(), Vec::new(), Vec::new())) };
+        let mut derived: Vec<DerivedOp> = Vec::new();
         let head = self.head()?;
         let mut expect = head.map(|h| (h.number + 1, h.hash));
         let mut counters = self.counters()?;
@@ -346,6 +599,31 @@ impl Store {
             }
         }
         let before = addrs.clone();
+        // Current balances and token stats the transfers touch.
+        let mut bals: HashMap<Vec<u8>, Option<Vec<u8>>> = HashMap::new();
+        let mut toks: HashMap<Addr, Option<TokenStats>> = HashMap::new();
+        for t in transfers.iter().flatten() {
+            toks.entry(t.token).or_insert(None);
+            for h in [t.from, t.to] {
+                if h != ZERO {
+                    bals.entry(k_bal(&t.token, &h, t.kind, &t.token_id)).or_insert(None);
+                }
+            }
+        }
+        let keys: Vec<Vec<u8>> = bals.keys().cloned().collect();
+        for (k, v) in keys.iter().zip(self.db.batched_multi_get_cf(self.cf(CF_BAL), keys.iter(), false)) {
+            if let Some(v) = v? {
+                bals.insert(k.clone(), Some(v.to_vec()));
+            }
+        }
+        let keys: Vec<Addr> = toks.keys().copied().collect();
+        for (k, v) in keys.iter().zip(self.db.batched_multi_get_cf(self.cf(CF_TOKEN), keys.iter(), false)) {
+            if let Some(v) = v? {
+                toks.insert(*k, Some(dec_rec(&v)?));
+            }
+        }
+        let bals_before = bals.clone();
+        let toks_before = toks.clone();
         let mut wb = WriteBatch::default();
         let cf_undo = self.cf(CF_UNDO);
         for fb in blocks {
@@ -356,7 +634,7 @@ impl Store {
                 }
             }
             let keep_undo = tip.is_none_or(|t| b.number + self.reorg_depth > t);
-            let mut undo = Undo { counters, addrs: Vec::new() };
+            let mut undo = Undo { counters, ..Default::default() };
             let mut seen: std::collections::HashSet<Addr> = std::collections::HashSet::new();
             for t in &fb.txs {
                 for (a, role) in tx_parties(t) {
@@ -378,6 +656,37 @@ impl Store {
                     addrs.insert(a, Some(info));
                 }
             }
+            let mut seen_bal: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+            let mut seen_tok: std::collections::HashSet<Addr> = std::collections::HashSet::new();
+            for t in &transfers[blocks_index(blocks, b.number)] {
+                let stats = toks[&t.token];
+                if keep_undo && seen_tok.insert(t.token) {
+                    undo.tokens.push((t.token, stats));
+                }
+                let mut st = stats.unwrap_or(TokenStats { kind: t.kind, first_block: b.number, ..Default::default() });
+                st.transfers += 1;
+                let v = u256(&t.value);
+                for (h, add) in [(t.from, false), (t.to, true)] {
+                    if h == ZERO {
+                        continue; // mint / burn side
+                    }
+                    let k = k_bal(&t.token, &h, t.kind, &t.token_id);
+                    let cur = bals[&k].clone();
+                    if keep_undo && seen_bal.insert(k.clone()) {
+                        undo.bals.push((k.clone(), cur.clone()));
+                    }
+                    let old = cur.as_deref().map(u256).unwrap_or_default();
+                    // Saturating: history before START_BLOCK is unknown.
+                    let new = if add { old.saturating_add(v) } else { old.saturating_sub(v) };
+                    match (old.is_zero(), new.is_zero()) {
+                        (true, false) => st.holders += 1,
+                        (false, true) => st.holders = st.holders.saturating_sub(1),
+                        _ => {}
+                    }
+                    bals.insert(k, (!new.is_zero()).then(|| min_bytes(new)));
+                }
+                toks.insert(t.token, Some(st));
+            }
             counters.blocks += 1;
             counters.txs += fb.txs.len() as u64;
             counters.logs += fb.logs.len() as u64;
@@ -389,26 +698,73 @@ impl Store {
             }
             expect = Some((b.number + 1, b.hash));
         }
-        let cf_rank = self.cf(CF_ADDR_RANK);
         for (a, info) in &addrs {
             if let Some(info) = info {
                 wb.put_cf(cf_addr, a, enc(info));
                 if let Some(Some(old)) = before.get(a) {
-                    wb.delete_cf(cf_rank, k_rank(old.tx_count, a));
+                    derived.push((CF_ADDR_RANK, k_rank(old.tx_count, a).to_vec(), false));
                 }
-                wb.put_cf(cf_rank, k_rank(info.tx_count, a), []);
+                derived.push((CF_ADDR_RANK, k_rank(info.tx_count, a).to_vec(), true));
+            }
+        }
+        let cf_bal = self.cf(CF_BAL);
+        for (k, cur) in &bals {
+            let old = &bals_before[k];
+            if old == cur {
+                continue;
+            }
+            write_bal(&mut wb, cf_bal, &mut derived, k, old.as_deref(), cur.as_deref());
+        }
+        let cf_tok = self.cf(CF_TOKEN);
+        for (a, st) in &toks {
+            if let Some(st) = st {
+                if let Some(Some(old)) = toks_before.get(a) {
+                    derived.push((CF_TOKEN_RANK, k_token_rank(old.transfers, a).to_vec(), false));
+                }
+                wb.put_cf(cf_tok, a, enc(st));
+                derived.push((CF_TOKEN_RANK, k_token_rank(st.transfers, a).to_vec(), true));
             }
         }
         let new_head = Head { number: last.block.number, hash: last.block.hash };
         let cf_meta = self.cf(CF_META);
         wb.put_cf(cf_meta, "counters", enc(&counters));
         wb.put_cf(cf_meta, "head", enc(&new_head));
-        Ok(wb)
+        let new_tokens = toks.keys().filter(|a| matches!(toks_before.get(*a), Some(None))).copied().collect();
+        Ok((wb, derived, new_tokens))
+    }
+
+    /// Tokens with no metadata record yet (e.g. the fetch was interrupted).
+    pub fn tokens_missing_meta(&self, limit: usize) -> Result<Vec<Addr>> {
+        let mut out = Vec::new();
+        for kv in self.db.iterator_cf(self.cf(CF_TOKEN), IteratorMode::Start) {
+            let (k, _) = kv?;
+            if self.db.get_pinned_cf(self.cf(CF_TOKEN_META), &k)?.is_none() {
+                out.push(k[..20].try_into()?);
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(out)
     }
 
     #[cfg(test)]
     pub fn apply_data_only(&self, blocks: &[FullBlock]) -> Result<()> {
-        self.write_data(blocks)
+        let transfers: Vec<_> = blocks.iter().map(crate::tokens::decode_block).collect();
+        self.write_data(blocks, &transfers)
+    }
+
+    /// Raw transfer rows of block `n` (no visibility checks; for rollback).
+    fn block_transfers(&self, n: u64) -> Result<Vec<crate::tokens::Transfer>> {
+        let mut ro = ReadOptions::default();
+        ro.set_iterate_upper_bound(k_tt(n + 1, 0, 0).to_vec());
+        let k = k_tt(n, 0, 0);
+        let mut out = Vec::new();
+        for kv in self.db.iterator_cf_opt(self.cf(CF_TT), ro, IteratorMode::From(&k, Direction::Forward)) {
+            let (_, v) = kv?;
+            out.push(dec_rec(&v)?);
+        }
+        Ok(out)
     }
 
     /// Removes the head block and restores the state before it. Returns the
@@ -431,6 +787,40 @@ impl Store {
             }
         }
         wb.delete_range_cf(&self.cf(CF_LOGS), k_num_idx(n, 0), k_num_idx(n + 1, 0));
+        for t in self.block_transfers(n)? {
+            wb.delete_cf(self.cf(CF_TT_TOKEN), k_tt_by(&t.token, n, t.log_index, t.sub));
+            for a in [t.from, t.to] {
+                if a != ZERO {
+                    wb.delete_cf(self.cf(CF_TT_ADDR), k_tt_by(&a, n, t.log_index, t.sub));
+                }
+            }
+        }
+        wb.delete_range_cf(self.cf(CF_TT), k_tt(n, 0, 0), k_tt(n + 1, 0, 0));
+        let mut derived: Vec<DerivedOp> = Vec::new();
+        for (k, prev) in &undo.bals {
+            let cur = self.db.get_cf(self.cf(CF_BAL), k)?;
+            write_bal(&mut wb, self.cf(CF_BAL), &mut derived, k, cur.as_deref(), prev.as_deref());
+        }
+        // Rollback is rare: derived entries go in the same atomic batch.
+        for (cf, k, put) in derived {
+            if put {
+                wb.put_cf(self.cf(cf), k, []);
+            } else {
+                wb.delete_cf(self.cf(cf), k);
+            }
+        }
+        for (a, prev) in &undo.tokens {
+            if let Some(cur) = self.get_rec::<TokenStats>(CF_TOKEN, a)? {
+                wb.delete_cf(self.cf(CF_TOKEN_RANK), k_token_rank(cur.transfers, a));
+            }
+            match prev {
+                Some(st) => {
+                    wb.put_cf(self.cf(CF_TOKEN), a, enc(st));
+                    wb.put_cf(self.cf(CF_TOKEN_RANK), k_token_rank(st.transfers, a), []);
+                }
+                None => wb.delete_cf(self.cf(CF_TOKEN), a),
+            }
+        }
         let cf_rank = self.cf(CF_ADDR_RANK);
         for (a, prev) in &undo.addrs {
             if let Some(cur) = self.addr_info(a)? {
@@ -672,7 +1062,9 @@ impl Store {
         for kv in self.db.iterator_cf(self.cf(CF_ADDR_RANK), IteratorMode::Start).skip(offset).take(limit) {
             let (k, _) = kv?;
             let a: Addr = k[8..28].try_into()?;
-            if let Some(i) = self.addr_info(&a)? {
+            let count = !u64::from_be_bytes(k[..8].try_into()?);
+            // Skip ranking entries that no longer match the record.
+            if let Some(i) = self.addr_info(&a)?.filter(|i| i.tx_count == count) {
                 out.push((a, i));
             }
         }
@@ -693,6 +1085,186 @@ impl Store {
             None => a.to_vec(),
         };
         self.addr_txs_from(a, &start, 0, limit)
+    }
+
+    // ---- tokens ----
+
+    /// A transfer row is served only if its block is visible and the log it
+    /// came from is still there (rows of an orphaned block are skipped).
+    fn transfer_ok(&self, n: u64, t: &crate::tokens::Transfer, counts: &mut HashMap<u64, u32>) -> Result<bool> {
+        let lc = match counts.get(&n) {
+            Some(c) => *c,
+            None => {
+                let c = self.block(n)?.map_or(0, |b| b.log_count);
+                counts.insert(n, c);
+                c
+            }
+        };
+        if t.log_index >= lc {
+            return Ok(false);
+        }
+        Ok(self
+            .get_rec::<LogRec>(CF_LOGS, &k_num_idx(n, t.log_index))?
+            .is_some_and(|l| l.address == t.token && l.tx_index == t.tx_index))
+    }
+
+    /// Newest-first transfers of a token (`by_token`) or involving an
+    /// address, strictly older than `before` (block, log, sub).
+    pub fn transfers_by(
+        &self,
+        a: &Addr,
+        by_token: bool,
+        before: Option<(u64, u32, u16)>,
+        limit: usize,
+    ) -> Result<Vec<(u64, crate::tokens::Transfer)>> {
+        let cf = self.cf(if by_token { CF_TT_TOKEN } else { CF_TT_ADDR });
+        let start = match before {
+            Some((n, l, sb)) => {
+                let mut k = k_tt_by(a, n, l, sb).to_vec();
+                k.push(0);
+                k
+            }
+            None => a.to_vec(),
+        };
+        let mut counts = HashMap::new();
+        let mut out = Vec::with_capacity(limit);
+        // Read a little past `limit` so skipped orphan rows rarely shorten a page.
+        for kv in self.db.iterator_cf(cf, IteratorMode::From(&start, Direction::Forward)).take(limit + 16) {
+            let (k, _) = kv?;
+            if !k.starts_with(a) || out.len() >= limit {
+                break;
+            }
+            let n = !u64::from_be_bytes(k[20..28].try_into()?);
+            let l = !u32::from_be_bytes(k[28..32].try_into()?);
+            let sb = !u16::from_be_bytes(k[32..34].try_into()?);
+            let Some(t) = self.get_rec::<crate::tokens::Transfer>(CF_TT, &k_tt(n, l, sb))? else { continue };
+            if self.transfer_ok(n, &t, &mut counts)? {
+                out.push((n, t));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Token transfers emitted by one transaction.
+    pub fn tx_transfers(&self, t: &TxRec) -> Result<Vec<crate::tokens::Transfer>> {
+        if t.log_count == 0 {
+            return Ok(Vec::new());
+        }
+        let mut ro = ReadOptions::default();
+        ro.set_iterate_upper_bound(k_tt(t.block_number, t.first_log_index + t.log_count, 0).to_vec());
+        let k = k_tt(t.block_number, t.first_log_index, 0);
+        let mut counts = HashMap::new();
+        let mut out = Vec::new();
+        for kv in self.db.iterator_cf_opt(self.cf(CF_TT), ro, IteratorMode::From(&k, Direction::Forward)) {
+            let (_, v) = kv?;
+            let tr: crate::tokens::Transfer = dec_rec(&v)?;
+            if tr.tx_index == t.index && self.transfer_ok(t.block_number, &tr, &mut counts)? {
+                out.push(tr);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn token(&self, a: &Addr) -> Result<Option<(TokenStats, TokenMeta)>> {
+        let Some(st) = self.get_rec::<TokenStats>(CF_TOKEN, a)? else { return Ok(None) };
+        Ok(Some((st, self.get_rec(CF_TOKEN_META, a)?.unwrap_or_default())))
+    }
+
+    /// Tokens by number of transfers, highest first.
+    pub fn top_tokens(&self, offset: usize, limit: usize) -> Result<Vec<(Addr, TokenStats, TokenMeta)>> {
+        let mut out = Vec::with_capacity(limit);
+        for kv in self.db.iterator_cf(self.cf(CF_TOKEN_RANK), IteratorMode::Start).skip(offset).take(limit) {
+            let (k, _) = kv?;
+            let a: Addr = k[8..28].try_into()?;
+            let count = !u64::from_be_bytes(k[..8].try_into()?);
+            if let Some((st, m)) = self.token(&a)?.filter(|(st, _)| st.transfers == count) {
+                out.push((a, st, m));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Largest holders of a token (ERC-20 balance / ERC-721 NFT count).
+    pub fn token_holders(&self, token: &Addr, offset: usize, limit: usize) -> Result<Vec<(Addr, Vec<u8>)>> {
+        let mut out = Vec::with_capacity(limit);
+        let it = self.db.iterator_cf(self.cf(CF_BAL_RANK), IteratorMode::From(token, Direction::Forward));
+        for kv in it.skip(offset).take(limit) {
+            let (k, _) = kv?;
+            if !k.starts_with(token) {
+                break;
+            }
+            let amount: Vec<u8> = k[20..52].iter().map(|b| !b).collect();
+            let lead = amount.iter().take_while(|&&x| x == 0).count();
+            let holder: Addr = k[52..72].try_into()?;
+            // Serve only entries that match the stored balance.
+            let cur = self.db.get_pinned_cf(self.cf(CF_BAL), k_bal(token, &holder, 0, &None))?;
+            if cur.as_deref() == Some(&amount[lead..]) {
+                out.push((holder, amount[lead..].to_vec()));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Tokens an address holds: (token, id for ERC-1155, amount).
+    pub fn holder_tokens(&self, holder: &Addr, limit: usize) -> Result<Vec<(Addr, Option<Vec<u8>>, Vec<u8>)>> {
+        let mut keys = Vec::new();
+        for kv in
+            self.db.iterator_cf(self.cf(CF_HOLDER_TOK), IteratorMode::From(holder, Direction::Forward)).take(limit)
+        {
+            let (k, _) = kv?;
+            if !k.starts_with(holder) {
+                break;
+            }
+            let mut bk = Vec::with_capacity(72);
+            bk.extend_from_slice(&k[20..40]);
+            bk.extend_from_slice(&k[..20]);
+            bk.extend_from_slice(&k[40..72]);
+            keys.push(bk);
+        }
+        let mut out = Vec::with_capacity(keys.len());
+        for (k, v) in keys.iter().zip(self.db.batched_multi_get_cf(self.cf(CF_BAL), keys.iter(), false)) {
+            if let Some(v) = v? {
+                let id = &k[40..72];
+                let id = (id.iter().any(|&b| b != 0)).then(|| {
+                    let lead = id.iter().take_while(|&&x| x == 0).count();
+                    id[lead..].to_vec()
+                });
+                out.push((k[..20].try_into()?, id, v.to_vec()));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Stores fetched metadata and indexes name and symbol for search.
+    pub fn put_token_meta(&self, token: &Addr, m: &TokenMeta) -> Result<()> {
+        let mut wb = WriteBatch::default();
+        wb.put_cf(self.cf(CF_TOKEN_META), token, enc(m));
+        for s in [&m.symbol, &m.name].into_iter().flatten() {
+            let mut k = s.to_lowercase().into_bytes();
+            k.truncate(64);
+            k.push(0);
+            k.extend_from_slice(token);
+            wb.put_cf(self.cf(CF_TOKEN_NAME), k, []);
+        }
+        self.db.write(wb)?;
+        Ok(())
+    }
+
+    /// Tokens whose lower-cased name or symbol starts with `prefix`.
+    pub fn search_tokens(&self, prefix: &str, limit: usize) -> Result<Vec<Addr>> {
+        let p = prefix.to_lowercase().into_bytes();
+        let mut out: Vec<Addr> = Vec::new();
+        for kv in self.db.iterator_cf(self.cf(CF_TOKEN_NAME), IteratorMode::From(&p, Direction::Forward)) {
+            let (k, _) = kv?;
+            if !k.starts_with(&p) || out.len() >= limit {
+                break;
+            }
+            let a: Addr = k[k.len() - 20..].try_into()?;
+            if !out.contains(&a) {
+                out.push(a);
+            }
+        }
+        Ok(out)
     }
 
     /// Addresses whose hex form starts with `prefix` (lower-case, no 0x).
@@ -916,5 +1488,108 @@ mod crash_tests {
         assert_eq!(s.addr_txs(&a(4), 0, 10).unwrap().len(), 0, "orphan past tx count leaked");
         assert_eq!(s.addr_txs(&a(1), 0, 10).unwrap().len(), 2);
         assert!(s.addr_info(&a(3)).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::tests::*;
+    use super::*;
+    use crate::tokens::{KIND_ERC20, KIND_ERC721, TRANSFER};
+
+    fn topic(a: Addr) -> H256 {
+        let mut t = [0u8; 32];
+        t[12..].copy_from_slice(&a);
+        t
+    }
+
+    fn amt(v: u64) -> Vec<u8> {
+        let mut w = vec![0u8; 32];
+        w[24..].copy_from_slice(&v.to_be_bytes());
+        w
+    }
+
+    /// Block with one tx per transfer: (token, from, to, Some(amount) = ERC-20 / None = NFT id 7).
+    fn tblock(n: u64, fork: u8, xs: Vec<(Addr, Addr, Addr, Option<u64>)>) -> FullBlock {
+        let mut fb = block(n, fork, 1, xs.iter().map(|(_, f, _, _)| (*f, Some(a(200)), None)).collect());
+        fb.logs = xs
+            .iter()
+            .enumerate()
+            .map(|(i, (tok, f, t, v))| match v {
+                Some(v) => LogRec {
+                    tx_index: i as u32,
+                    address: *tok,
+                    topics: vec![TRANSFER, topic(*f), topic(*t)],
+                    data: amt(*v),
+                },
+                None => LogRec {
+                    tx_index: i as u32,
+                    address: *tok,
+                    topics: vec![TRANSFER, topic(*f), topic(*t), topic(a(7))],
+                    data: vec![],
+                },
+            })
+            .collect();
+        for (i, t) in fb.txs.iter_mut().enumerate() {
+            t.first_log_index = i as u32;
+            t.log_count = 1;
+        }
+        fb.block.log_count = fb.logs.len() as u32;
+        fb
+    }
+
+    fn bal(s: &Store, tok: Addr, h: Addr) -> u64 {
+        s.holder_tokens(&h, 100).unwrap().iter().find(|(t, _, _)| *t == tok).map_or(0, |(_, _, v)| {
+            let mut w = [0u8; 8];
+            w[8 - v.len()..].copy_from_slice(v);
+            u64::from_be_bytes(w)
+        })
+    }
+
+    #[test]
+    fn balances_holders_and_rollback() {
+        let d = tempfile::tempdir().unwrap();
+        let s = open(d.path());
+        let (usd, nft, z) = (a(50), a(51), [0u8; 20]);
+        s.apply(&[tblock(0, 1, vec![(usd, z, a(1), Some(100)), (nft, z, a(1), None)])]).unwrap();
+        s.apply(&[tblock(1, 1, vec![(usd, a(1), a(2), Some(30))])]).unwrap();
+        let snapshot = |s: &Store| {
+            (
+                bal(s, usd, a(1)),
+                bal(s, usd, a(2)),
+                s.token(&usd).unwrap().map(|(st, _)| st),
+                s.token_holders(&usd, 0, 10).unwrap(),
+                s.top_tokens(0, 10).unwrap().iter().map(|(a, st, _)| (a[0], st.transfers)).collect::<Vec<_>>(),
+                s.transfers_by(&a(2), false, None, 10).unwrap().len(),
+            )
+        };
+        let before = snapshot(&s);
+        assert_eq!((before.0, before.1), (70, 30));
+        assert_eq!(before.2.unwrap(), TokenStats { kind: KIND_ERC20, transfers: 2, holders: 2, first_block: 0 });
+        assert_eq!(before.3.iter().map(|(h, _)| h[0]).collect::<Vec<_>>(), vec![1, 2], "holders by balance");
+        assert_eq!(before.4, vec![(50, 2), (51, 1)]);
+        assert_eq!(before.5, 1);
+        assert_eq!(s.token(&nft).unwrap().unwrap().0.kind, KIND_ERC721);
+        assert_eq!(bal(&s, nft, a(1)), 1, "NFT count");
+        // a(1) sends everything and the NFT away; a(2) becomes the only USD holder
+        s.apply(&[tblock(2, 1, vec![(usd, a(1), a(2), Some(70)), (nft, a(1), a(3), None)])]).unwrap();
+        assert_eq!((bal(&s, usd, a(1)), bal(&s, usd, a(2))), (0, 100));
+        assert_eq!(s.token(&usd).unwrap().unwrap().0.holders, 1);
+        assert_eq!(s.token_holders(&usd, 0, 10).unwrap().len(), 1);
+        assert!(s.holder_tokens(&a(1), 10).unwrap().is_empty());
+        let tx = s.block_txs(2).unwrap()[0].clone();
+        assert_eq!(s.tx_transfers(&tx).unwrap().len(), 1);
+        assert_eq!(
+            s.transfers_by(&usd, true, None, 10).unwrap().iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            vec![2, 1, 0]
+        );
+        let page2 = s.transfers_by(&usd, true, Some((2, 0, 0)), 10).unwrap();
+        assert_eq!(page2.iter().map(|(n, _)| *n).collect::<Vec<_>>(), vec![1, 0]);
+        // rollback block 2: everything back exactly
+        s.rollback_head().unwrap();
+        assert_eq!(snapshot(&s), before);
+        assert_eq!(bal(&s, nft, a(1)), 1);
+        assert_eq!(bal(&s, nft, a(3)), 0);
+        assert!(s.transfers_by(&a(3), false, None, 10).unwrap().is_empty());
     }
 }
