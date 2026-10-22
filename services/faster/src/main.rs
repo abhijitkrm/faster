@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
         start_block: env("START_BLOCK", 0)?,
         confirmations: env("CONFIRMATIONS", 0)?,
         fetch_batch: env("FETCH_BATCH", 10)?,
-        concurrency: env("FETCH_CONCURRENCY", 8)?,
+        concurrency: env("FETCH_CONCURRENCY", 16)?,
         window: env("FETCH_WINDOW", 2000)?,
         commit_blocks: env("COMMIT_BLOCKS", 500)?,
         poll: Duration::from_millis(env("POLL_MS", 250)?),

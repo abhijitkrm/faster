@@ -62,7 +62,7 @@ impl Indexer {
         let mut last_log = Instant::now();
         let mut last_logged_head = self.store.head()?.map(|h| h.number).unwrap_or(0);
         loop {
-            let tip = self.retry("eth_blockNumber", || self.rpc.block_number()).await;
+            let tip = retry("eth_blockNumber", || self.rpc.block_number()).await;
             self.status.tip.store(tip, Ordering::Relaxed);
             let target = tip.saturating_sub(self.cfg.confirmations);
             let head = self.store.head()?;
@@ -105,32 +105,56 @@ impl Indexer {
             .step_by(batch as usize)
             .map(|s| (s..=end.min(s + batch - 1)).collect())
             .collect();
+        // Each fetch (HTTP + JSON decode) is its own task, so decoding runs on
+        // all cores and keeps going while the store commits.
+        let rpc = self.rpc.clone();
         let mut fetched = stream::iter(chunks)
-            .map(|nums| async move { self.retry("blocks", || self.rpc.blocks(&nums)).await })
+            .map(|nums| {
+                let rpc = rpc.clone();
+                tokio::spawn(async move { retry("blocks", || rpc.blocks(&nums)).await })
+            })
             .buffered(self.cfg.concurrency);
-        let mut prev = head;
-        let mut pending: Vec<FullBlock> = Vec::new();
-        while let Some(blocks) = fetched.next().await {
-            for fb in blocks {
-                if let Some(p) = prev {
-                    if fb.block.parent_hash != p.hash {
-                        tracing::warn!(
-                            block = fb.block.number,
-                            "parent hash mismatch: chain reorganised"
-                        );
-                        self.commit(std::mem::take(&mut pending)).await?;
-                        return Ok(Round::Reorg);
+        // Commits run one at a time on their own future, overlapped with
+        // fetching: the consumer below keeps checking and queueing blocks
+        // while the previous batch is written.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<FullBlock>>(2);
+        let committer = async {
+            while let Some(b) = rx.recv().await {
+                self.commit(b).await?;
+            }
+            anyhow::Ok(())
+        };
+        let consumer = async move {
+            let mut prev = head;
+            let mut pending: Vec<FullBlock> = Vec::new();
+            while let Some(blocks) = fetched.next().await {
+                for fb in blocks? {
+                    if let Some(p) = prev {
+                        if fb.block.parent_hash != p.hash {
+                            tracing::warn!(block = fb.block.number, "parent hash mismatch: chain reorganised");
+                            if !pending.is_empty() {
+                                tx.send(pending).await?;
+                            }
+                            return anyhow::Ok(Round::Reorg);
+                        }
+                    }
+                    prev = Some(Head { number: fb.block.number, hash: fb.block.hash });
+                    pending.push(fb);
+                    if pending.len() >= self.cfg.commit_blocks {
+                        tx.send(std::mem::take(&mut pending)).await?;
                     }
                 }
-                prev = Some(Head { number: fb.block.number, hash: fb.block.hash });
-                pending.push(fb);
-                if pending.len() >= self.cfg.commit_blocks {
-                    self.commit(std::mem::take(&mut pending)).await?;
-                }
             }
-        }
-        self.commit(pending).await?;
-        Ok(Round::Done)
+            if !pending.is_empty() {
+                tx.send(pending).await?;
+            }
+            Ok(Round::Done)
+        };
+        // The consumer drops its sender when it returns, which ends the
+        // committer once everything queued is written.
+        let (c, r) = tokio::join!(committer, consumer);
+        c?;
+        r
     }
 
     async fn commit(&self, blocks: Vec<FullBlock>) -> Result<()> {
@@ -138,7 +162,11 @@ impl Indexer {
             return Ok(());
         }
         let store = self.store.clone();
-        let blocks = tokio::task::spawn_blocking(move || store.apply(&blocks).map(|_| blocks)).await??;
+        let t = Instant::now();
+        let tip = Some(self.status.tip.load(Ordering::Relaxed));
+        let blocks = tokio::task::spawn_blocking(move || store.apply_at(&blocks, tip).map(|_| blocks)).await??;
+        let txs: usize = blocks.iter().map(|b| b.txs.len()).sum();
+        tracing::debug!(blocks = blocks.len(), txs, ms = t.elapsed().as_millis() as u64, "commit");
         let last = blocks.last().unwrap().block.number;
         self.status.head.store(last, Ordering::Relaxed);
         self.sink.committed(&blocks);
@@ -151,7 +179,7 @@ impl Indexer {
         loop {
             let Some(head) = self.store.head()? else { break };
             let nums = [head.number];
-            let canon = self.retry("canonical block", || self.rpc.blocks(&nums)).await;
+            let canon = retry("canonical block", || self.rpc.blocks(&nums)).await;
             if canon[0].block.hash == head.hash {
                 break;
             }
@@ -174,28 +202,28 @@ impl Indexer {
         self.sink.reorged(head);
         Ok(())
     }
+}
 
-    /// Retries transient failures (transport, not-ready blocks) forever with
-    /// capped exponential backoff. Bad data is retried too but logged as an
-    /// error, since it usually needs operator attention.
-    async fn retry<T, F, Fut>(&self, what: &str, f: F) -> T
-    where
-        F: Fn() -> Fut,
-        Fut: std::future::Future<Output = Result<T, RpcError>>,
-    {
-        let mut backoff = Duration::from_millis(100);
-        loop {
-            match f().await {
-                Ok(v) => return v,
-                Err(e @ RpcError::NotReady(_)) => tracing::debug!(what, err = %e, "not ready, retrying"),
-                Err(e @ (RpcError::Decode(_) | RpcError::Rpc { .. })) => {
-                    tracing::error!(what, err = %e, "rpc error, retrying")
-                }
-                Err(e) => tracing::warn!(what, err = %e, "rpc failed, retrying"),
+/// Retries transient failures (transport, not-ready blocks) forever with
+/// capped exponential backoff. Bad data is retried too but logged as an
+/// error, since it usually needs operator attention.
+async fn retry<T, F, Fut>(what: &str, f: F) -> T
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T, RpcError>>,
+{
+    let mut backoff = Duration::from_millis(100);
+    loop {
+        match f().await {
+            Ok(v) => return v,
+            Err(e @ RpcError::NotReady(_)) => tracing::debug!(what, err = %e, "not ready, retrying"),
+            Err(e @ (RpcError::Decode(_) | RpcError::Rpc { .. })) => {
+                tracing::error!(what, err = %e, "rpc error, retrying")
             }
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(MAX_BACKOFF);
+            Err(e) => tracing::warn!(what, err = %e, "rpc failed, retrying"),
         }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
 

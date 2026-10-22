@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Faster explorer: RocksDB hot store, chain indexer and explorer API in one process"
 publish = false
+default-run = "faster"
 
 [dependencies]
 anyhow = "1"

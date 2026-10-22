@@ -44,10 +44,22 @@ Access paths:
 2. A block is only accepted whole: a null block, a missing receipt, or a
    receipt for another tx is "not ready" and is retried with backoff (100 ms
    to 5 s). Nothing partial is ever written.
-3. Blocks are committed in order, up to `COMMIT_BLOCKS` per write. One
-   RocksDB WriteBatch holds the rows, address updates, counters, the undo
-   record and the new head, and is fsynced. The head key *is* the checkpoint,
-   so a crash can never leave data and checkpoint out of step.
+3. Blocks are committed in order, up to `COMMIT_BLOCKS` per commit, on a
+   committer that runs alongside fetching. Each commit has two phases:
+   - data rows (blocks, hashes, txs, logs, address history) are written as
+     several batches from parallel threads (RocksDB inserts each batch into
+     its memtable on its own thread), without fsync. Rewriting the same block
+     produces identical rows, so these writes are idempotent;
+   - then one fsynced batch with address info, counters, undo records and the
+     new head. The head key *is* the checkpoint.
+
+   A crash between the phases can leave rows above the head (or, after a
+   later reorg, rows of an orphaned block). Reads never look above the head,
+   bound a block's txs by its `tx_count`, and check that hash-index hits and
+   address-history hits really match, so such rows are never served and are
+   overwritten when the block is indexed again.
+   Blocks more than `REORG_DEPTH` below the node's tip get no undo record:
+   they can never be rolled back, and skipping them makes catch-up cheaper.
 4. Address `tx_count` counts distinct transactions: the `addr_tx` key is
    unique per (address, tx), so a self-transfer counts once.
 
@@ -102,7 +114,7 @@ the UI reconnects and receives `init`. Per commit at most 50 `block` and 20
 | `CONFIRMATIONS` | 0 | blocks to stay behind the tip |
 | `REORG_DEPTH` | 256 | undo history kept |
 | `FETCH_BATCH` | 10 | blocks per JSON-RPC batch |
-| `FETCH_CONCURRENCY` | 8 | batches in flight |
+| `FETCH_CONCURRENCY` | 16 | batches in flight |
 | `FETCH_WINDOW` | 2000 | blocks planned per round |
 | `COMMIT_BLOCKS` | 500 | max blocks per atomic write |
 | `POLL_MS` | 250 | head poll interval when caught up |
@@ -112,7 +124,26 @@ the UI reconnects and receives `init`. Per commit at most 50 `block` and 20
 | `CLOB_API_URL` | unset | api-go base URL for `/api/clob/*` |
 | `LOG_LEVEL` / `RUST_LOG` / `LOG_FORMAT` | info / – / json | `LOG_FORMAT=text` for humans |
 
-## Measurements (2026-10-22, M1 Pro laptop, anvil node)
+## Measurements (2026-10-22, M1 Pro laptop)
+
+Indexer ceiling, synthetic node (`target/release/fakenode`, 500 txs/block,
+20% with two Transfer logs, ~200K skewed addresses), fresh store:
+
+| Change | tx/s |
+|---|---|
+| P0 baseline (single batch, decode on the commit task) | 122K |
+| fetch + decode in spawned tasks | 145K |
+| commits pipelined with fetching | 154K |
+| varint records (size −23%, speed unchanged) | 154K |
+| data rows written from parallel threads, state batch last | 176–187K |
+| state batch built during data writes, no undo below REORG_DEPTH | 236K |
+| 1/1/2 writer layout, 16 fetches in flight (3 runs) | 240–281K |
+| same, 3M txs (6,000 blocks) | 253K sustained, 1.2 GB |
+
+Finer sharding (3 writers per table) was slower: 218K. At this point faster
+and the synthetic node share the 8 cores; faster uses ~2.3 cores.
+
+### P0 run against anvil
 
 Chain: 2,202 blocks, 1,100,001 txs (500 per block, 20% contract calls emitting
 a log), 1,350 addresses, one address in 621,827 txs.
