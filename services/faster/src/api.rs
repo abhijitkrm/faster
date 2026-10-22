@@ -389,6 +389,7 @@ pub fn router(state: AppState, limiter: Arc<crate::guard::Limiter>) -> Router {
         .route("/api/tokens/{addr}/holders", get(token_holders))
         .route("/api/addresses/{addr}/token-transfers", get(address_token_transfers))
         .route("/api/addresses/{addr}/tokens", get(address_tokens))
+        .route("/api/addresses/{addr}/internal", get(address_internals))
         .route("/api/search", get(search))
         .route("/api/clob/stats", get(crate::clob::stats))
         .route("/api/clob/orders/{hash}", get(crate::clob::item_by_hash))
@@ -518,6 +519,8 @@ async fn tx_detail(State(s): State<AppState>, Path(hash): Path<String>) -> Resul
         })
         .collect();
     v["logs"] = Value::Array(logs);
+    v["internal_transactions"] =
+        Value::Array(s.store.tx_internals(&t)?.iter().map(|c| internal_json(None, c)).collect());
     let mut ctx = TokenCtx::default();
     let tts = s.store.tx_transfers(&t)?;
     v["token_transfers"] =
@@ -608,6 +611,55 @@ async fn address_detail(State(s): State<AppState>, Path(addr): Path<String>, Que
         "limit": limit,
         "next_cursor": next_cursor,
     })))
+}
+
+// ---- internal transactions ----
+
+pub fn internal_json(ctx: Option<(u64, &H256, u64)>, c: &InternalTx) -> Value {
+    let mut v = json!({
+        "transaction_index": c.tx_index,
+        "trace_index": c.trace_index,
+        "depth": c.depth,
+        "type": c.call_type,
+        "from_address": hex0x(&c.from),
+        "to_address": c.to.map(|a| hex0x(&a)),
+        "value": dec(&c.value),
+        "gas": c.gas,
+        "gas_used": c.gas_used,
+        "error": c.error,
+    });
+    if let Some((n, h, ts)) = ctx {
+        v["block_number"] = json!(n);
+        v["block_timestamp"] = json!(ts);
+        v["transaction_hash"] = json!(hex0x(h));
+        v["cursor"] = json!(format!("{n}:{}:{}", c.tx_index, c.trace_index));
+    }
+    v
+}
+
+async fn address_internals(State(s): State<AppState>, Path(addr): Path<String>, Query(q): Query<ListQ>) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    let limit = limit_or(&q, 25, 100);
+    let before = match q.before.as_deref() {
+        Some(c) => {
+            let p: Vec<&str> = c.split(':').collect();
+            let parsed =
+                (p.len() == 3).then(|| Some((p[0].parse().ok()?, p[1].parse().ok()?, p[2].parse().ok()?))).flatten();
+            Some(parsed.ok_or(ApiError::BadRequest("Invalid cursor"))?)
+        }
+        None => None,
+    };
+    let rows = s.store.addr_internals(&a, before, limit)?;
+    let mut ts: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+    let mut items = Vec::with_capacity(rows.len());
+    for (n, h, c) in &rows {
+        if !ts.contains_key(n) {
+            ts.insert(*n, s.store.block(*n)?.map_or(0, |b| b.timestamp));
+        }
+        items.push(internal_json(Some((*n, h, ts[n])), c));
+    }
+    let next = if items.len() == limit { items.last().map(|v| v["cursor"].clone()) } else { None };
+    Ok(Json(json!({"items": items, "next_cursor": next})))
 }
 
 // ---- tokens ----

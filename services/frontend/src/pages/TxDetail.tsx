@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 
 import { API } from '../config';
 import { TransfersTable } from '../tokens';
+import { InternalTable } from '../components/InternalTable';
 
 const fmtNum   = (n) => (n == null ? '—' : Number(n).toLocaleString());
 const fmtEth   = (wei) => { try { return (Number(BigInt(wei)) / 1e18).toFixed(6); } catch { return '0.000000'; } };
@@ -235,6 +236,19 @@ export default function TxDetail() {
           </Row>
         )}
       </div>
+
+      {/* Internal calls */}
+      {tx.internal_transactions && tx.internal_transactions.length > 0 && (
+        <>
+          <div className="page-head">
+            <span className="page-title">Internal Transactions</span>
+            <span className="page-count">{tx.internal_transactions.length}</span>
+          </div>
+          <div className="panel" style={{ marginBottom: 18 }}>
+            <InternalTable items={tx.internal_transactions} />
+          </div>
+        </>
+      )}
 
       {/* Token transfers */}
       {tx.token_transfers && tx.token_transfers.length > 0 && (

@@ -100,6 +100,22 @@ Transfer fields: `block_number`, `block_timestamp`, `transaction_hash`,
 address (`type: "token"` if it is a token contract) or token name / symbol
 prefix: `[{"type": "block" | "transaction" | "address" | "token", "value": ...}]`.
 
+## Internal transactions
+
+With `TRACE_CALLS=true` the indexer also fetches `debug_traceBlockByNumber`
+(callTracer) for every block and stores each call made inside a transaction.
+This needs a node that serves traces for every indexed block (an archive node
+for history).
+
+- `GET /api/transactions/{hash}` includes `internal_transactions`
+- `GET /api/addresses/{address}/internal?limit=25&before=` — newest first, cursor paging
+
+Fields: `transaction_index`, `trace_index` (depth-first order within the
+tx), `depth` (1 = called by the tx itself), `type` (CALL, DELEGATECALL,
+STATICCALL, CALLCODE, CREATE, CREATE2, SELFDESTRUCT), `from_address`,
+`to_address`, `value`, `gas`, `gas_used`, `error`; list items add
+`block_number`, `block_timestamp`, `transaction_hash`, `cursor`.
+
 ## Etherscan-compatible API
 
 `GET /api?module=...&action=...` with Etherscan's envelope

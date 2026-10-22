@@ -65,12 +65,33 @@ pub struct LogRec {
     pub data: Vec<u8>,
 }
 
+/// A call made inside a transaction (from the node's call tracer).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InternalTx {
+    pub tx_index: u32,
+    /// Depth-first position among the tx's internal calls.
+    pub trace_index: u32,
+    /// First 8 bytes of the tx hash, to detect rows of an orphaned block.
+    pub tx_hash8: [u8; 8],
+    pub depth: u16,
+    /// CALL, DELEGATECALL, STATICCALL, CALLCODE, CREATE, CREATE2, SELFDESTRUCT
+    pub call_type: String,
+    pub from: Addr,
+    pub to: Option<Addr>,
+    pub value: Vec<u8>,
+    pub gas: u64,
+    pub gas_used: u64,
+    pub error: Option<String>,
+}
+
 /// One block with everything the store needs to index it.
 #[derive(Clone, Debug)]
 pub struct FullBlock {
     pub block: BlockRec,
     pub txs: Vec<TxRec>,
     pub logs: Vec<LogRec>,
+    /// Empty unless call tracing is enabled.
+    pub internals: Vec<InternalTx>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

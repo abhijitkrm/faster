@@ -29,6 +29,7 @@ faster directly, set `TRUST_PROXY_HEADERS=false`.
 | `REORG_DEPTH` | 256 | deepest reorg handled; deeper stops the process (resync needed) |
 | `FETCH_BATCH` / `FETCH_CONCURRENCY` | 10 / 16 | blocks per RPC batch / batches in flight; lower them for rate-limited providers |
 | `CACHE_MB` | 512 | RocksDB block cache |
+| `TRACE_CALLS` | false | index internal transactions (needs `debug_traceBlockByNumber`; archive node for history) |
 | `RATE_LIMIT_RPS` / `RATE_LIMIT_BURST` | 100 / 200 | per client IP; 0 disables |
 | `CORS_ORIGINS` | `*` | comma-separated allow-list for browsers on other origins |
 | `FASTER_API_URL` | empty | UI → API base URL; empty = same origin (via nginx) |

@@ -63,6 +63,7 @@ pub async fn handler(State(s): State<AppState>, Query(q): Query<HashMap<String, 
         ("account", "tokentx") => tokentx(&s, &q, KIND_ERC20),
         ("account", "tokennfttx") => tokentx(&s, &q, KIND_ERC721),
         ("account", "token1155tx") => tokentx(&s, &q, KIND_ERC1155),
+        ("account", "txlistinternal") => txlistinternal(&s, &q),
         ("block", "getblocknumberbytime") => blockbytime(&s, &q),
         ("transaction", "gettxreceiptstatus") => receipt_status(&s, &q),
         ("proxy", "eth_blockNumber") => {
@@ -198,6 +199,52 @@ fn tokentx(s: &AppState, q: &HashMap<String, String>, kind: u8) -> Result<Json<V
             }
         }
         out.push(v);
+    }
+    Ok(ok(Value::Array(out)))
+}
+
+fn txlistinternal(s: &AppState, q: &HashMap<String, String>) -> Result<Json<Value>, String> {
+    let item = |n: u64, ts: u64, h: &H256, c: &InternalTx| {
+        json!({
+            "blockNumber": n.to_string(),
+            "timeStamp": ts.to_string(),
+            "hash": hex0x(h),
+            "from": hex0x(&c.from),
+            "to": c.to.filter(|_| !c.call_type.starts_with("CREATE")).map(|a| hex0x(&a)).unwrap_or_default(),
+            "value": dec(&c.value),
+            "contractAddress": c.to.filter(|_| c.call_type.starts_with("CREATE")).map(|a| hex0x(&a)).unwrap_or_default(),
+            "input": "",
+            "type": c.call_type.to_lowercase(),
+            "gas": c.gas.to_string(),
+            "gasUsed": c.gas_used.to_string(),
+            "traceId": format!("{}", c.trace_index),
+            "isError": if c.error.is_some() { "1" } else { "0" },
+            "errCode": c.error.clone().unwrap_or_default(),
+        })
+    };
+    if let Some(h) = qs(q, "txhash") {
+        let h = parse_fixed::<32>(h).ok_or("Error! Invalid txhash format")?;
+        let Some(t) = s.store.tx_by_hash(&h).map_err(internal)? else { return Ok(ok(json!([]))) };
+        let out: Vec<Value> = s
+            .store
+            .tx_internals(&t)
+            .map_err(internal)?
+            .iter()
+            .map(|c| item(t.block_number, t.block_timestamp, &h, c))
+            .collect();
+        return Ok(ok(Value::Array(out)));
+    }
+    let a = addr_param(q, "address")?;
+    let (start, end, _asc, skip, limit) = window(q)?;
+    // Newest first; startblock/endblock filter the walk.
+    let rows = s
+        .store
+        .addr_internals(&a, Some((end.min(u64::MAX - 1), u32::MAX, u32::MAX)), skip + limit)
+        .map_err(internal)?;
+    let mut out = Vec::new();
+    for (n, h, c) in rows.iter().filter(|(n, _, _)| *n >= start).skip(skip).take(limit) {
+        let ts = s.store.block(*n).map_err(internal)?.map_or(0, |b| b.timestamp);
+        out.push(item(*n, ts, h, c));
     }
     Ok(ok(Value::Array(out)))
 }

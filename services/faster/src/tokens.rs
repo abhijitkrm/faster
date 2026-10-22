@@ -197,6 +197,7 @@ mod tests {
             },
             txs: vec![],
             logs,
+            internals: vec![],
         }
     }
 

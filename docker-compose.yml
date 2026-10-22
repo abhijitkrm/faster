@@ -18,6 +18,7 @@ services:
       FETCH_BATCH: ${FETCH_BATCH:-10}
       FETCH_CONCURRENCY: ${FETCH_CONCURRENCY:-16}
       CACHE_MB: ${CACHE_MB:-512}
+      TRACE_CALLS: ${TRACE_CALLS:-false}
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_DB: clob
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clob}

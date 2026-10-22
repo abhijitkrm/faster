@@ -131,6 +131,7 @@ the UI reconnects and receives `init`. Per commit at most 50 `block` and 20
 | `COMMIT_BLOCKS` | 500 | max blocks per atomic write |
 | `POLL_MS` | 250 | head poll interval when caught up |
 | `CACHE_MB` | 512 | RocksDB block cache |
+| `TRACE_CALLS` | false | fetch call traces and index internal transactions |
 | `RPC_TIMEOUT_MS` | 15000 | per JSON-RPC request |
 | `READY_MAX_LAG` | 10 | `/ready` threshold |
 | `CLOB_API_URL` | unset | api-go base URL for `/api/clob/*` |

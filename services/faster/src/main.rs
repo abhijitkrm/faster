@@ -95,6 +95,9 @@ async fn main() -> Result<()> {
     let store =
         store::Store::open(&data_dir.join("hot"), store::StoreConfig { cache_bytes: cache_mb << 20, reorg_depth })?;
     let rpc = Arc::new(rpc::Rpc::new(&rpc_url, rpc_timeout)?);
+    // Internal transactions need debug_traceBlockByNumber (callTracer) and
+    // state for every indexed block, i.e. an archive node for history.
+    rpc.set_trace(env("TRACE_CALLS", false)?);
     let status = Arc::new(Status::default());
     let hub = api::Hub::new(store.clone());
 

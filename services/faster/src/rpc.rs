@@ -31,6 +31,8 @@ pub struct Rpc {
     /// Cleared after the node answers eth_getBlockReceipts with
     /// "method not found"; we then fetch receipts one tx at a time (batched).
     block_receipts: AtomicBool,
+    /// Fetch internal calls with debug_traceBlockByNumber (TRACE_CALLS).
+    trace: AtomicBool,
 }
 
 #[derive(Deserialize)]
@@ -50,7 +52,11 @@ struct ErrObj {
 impl Rpc {
     pub fn new(url: &str, timeout: Duration) -> anyhow::Result<Self> {
         let http = reqwest::Client::builder().timeout(timeout).pool_max_idle_per_host(64).tcp_nodelay(true).build()?;
-        Ok(Rpc { url: url.to_string(), http, block_receipts: AtomicBool::new(true) })
+        Ok(Rpc { url: url.to_string(), http, block_receipts: AtomicBool::new(true), trace: AtomicBool::new(false) })
+    }
+
+    pub fn set_trace(&self, on: bool) {
+        self.trace.store(on, Ordering::Relaxed);
     }
 
     /// Sends one JSON-RPC batch and returns each call's raw result in request
@@ -169,6 +175,29 @@ impl Rpc {
     /// Fetches complete blocks (header, txs, receipts, logs). Fails with
     /// NotReady rather than returning a partial block.
     pub async fn blocks(&self, numbers: &[u64]) -> Result<Vec<FullBlock>, RpcError> {
+        let mut out = self.blocks_receipts(numbers).await?;
+        if self.trace.load(Ordering::Relaxed) {
+            let calls: Vec<_> = numbers
+                .iter()
+                .map(|n| ("debug_traceBlockByNumber", json!([format!("0x{n:x}"), {"tracer": "callTracer"}])))
+                .collect();
+            match self.batch(&calls).await {
+                Ok(res) => {
+                    for (fb, r) in out.iter_mut().zip(res) {
+                        fb.internals = decode_traces(r.as_deref(), fb)?;
+                    }
+                }
+                Err(RpcError::Rpc { code, .. }) if code == METHOD_NOT_FOUND => {
+                    tracing::error!("TRACE_CALLS is on but the node has no debug_traceBlockByNumber; tracing disabled");
+                    self.trace.store(false, Ordering::Relaxed);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    }
+
+    async fn blocks_receipts(&self, numbers: &[u64]) -> Result<Vec<FullBlock>, RpcError> {
         if self.block_receipts.load(Ordering::Relaxed) {
             let mut calls = Vec::with_capacity(numbers.len() * 2);
             for n in numbers {
@@ -283,6 +312,72 @@ pub(crate) struct RpcLog {
     address: String,
     topics: Vec<String>,
     data: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Frame {
+    #[serde(rename = "type")]
+    call_type: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    value: Option<String>,
+    gas: Option<String>,
+    gas_used: Option<String>,
+    error: Option<String>,
+    #[serde(default)]
+    calls: Vec<Frame>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceItem {
+    tx_hash: Option<String>,
+    result: Option<Frame>,
+}
+
+/// Flattens callTracer output for a block into internal calls (the top
+/// frame of each tx is the tx itself and is skipped).
+fn decode_traces(v: Option<&RawValue>, fb: &FullBlock) -> Result<Vec<InternalTx>, RpcError> {
+    let n = fb.block.number;
+    let items: Vec<TraceItem> = decode(v, &format!("traces {n}"))?;
+    if items.len() != fb.txs.len() {
+        return Err(RpcError::NotReady(format!("block {n}: {} traces for {} txs", items.len(), fb.txs.len())));
+    }
+    fn walk(f: &Frame, depth: u16, tx: &TxRec, out: &mut Vec<InternalTx>, n: u64) -> Result<(), RpcError> {
+        for c in &f.calls {
+            let call_type = c.call_type.clone().unwrap_or_else(|| "CALL".into()).to_uppercase();
+            out.push(InternalTx {
+                tx_index: tx.index,
+                trace_index: out.len() as u32,
+                tx_hash8: tx.hash[..8].try_into().unwrap(),
+                depth,
+                from: c.from.as_deref().and_then(parse_fixed::<20>).ok_or_else(|| bad("trace from", n))?,
+                to: c.to.as_deref().and_then(parse_fixed::<20>),
+                value: c.value.as_deref().and_then(parse_quantity).unwrap_or_default(),
+                gas: c.gas.as_deref().and_then(parse_u64).unwrap_or(0),
+                gas_used: c.gas_used.as_deref().and_then(parse_u64).unwrap_or(0),
+                error: c.error.clone().map(|e| e.chars().take(200).collect()),
+                call_type,
+            });
+            walk(c, depth + 1, tx, out, n)?;
+        }
+        Ok(())
+    }
+    let mut all = Vec::new();
+    for (tx, item) in fb.txs.iter().zip(&items) {
+        if let Some(h) = item.tx_hash.as_deref().and_then(parse_fixed::<32>) {
+            if h != tx.hash {
+                return Err(RpcError::NotReady(format!("block {n}: trace for another tx")));
+            }
+        }
+        let mut out = Vec::new();
+        if let Some(root) = &item.result {
+            walk(root, 1, tx, &mut out, n)?;
+        }
+        all.extend(out);
+    }
+    Ok(all)
 }
 
 fn decode_block(v: Option<&RawValue>, n: u64) -> Result<RpcBlock, RpcError> {
@@ -409,7 +504,7 @@ pub(crate) fn assemble(b: RpcBlock, rs: Vec<RpcReceipt>) -> Result<FullBlock, Rp
         tx_count: txs.len() as u32,
         log_count: logs.len() as u32,
     };
-    Ok(FullBlock { block, txs, logs })
+    Ok(FullBlock { block, txs, logs, internals: Vec::new() })
 }
 
 #[cfg(test)]
@@ -444,6 +539,28 @@ mod tests {
         assert_eq!(t.effective_gas_price, Some(vec![8]));
         assert_eq!(dec(&t.value), "1000000000000000000");
         assert_eq!(fb.logs[0].tx_index, 0);
+    }
+
+    #[test]
+    fn flattens_call_traces() {
+        let b: RpcBlock = serde_json::from_str(BLOCK).unwrap();
+        let rs: Vec<RpcReceipt> = serde_json::from_str(RECEIPTS).unwrap();
+        let fb = assemble(b, rs).unwrap();
+        let tr = r#"[{"txHash":"0x3333333333333333333333333333333333333333333333333333333333333333","result":
+          {"type":"CREATE","from":"0x00000000000000000000000000000000000000bb","to":"0x00000000000000000000000000000000000000cc","calls":[
+            {"type":"CALL","from":"0x00000000000000000000000000000000000000cc","to":"0x00000000000000000000000000000000000000dd","value":"0x5","gasUsed":"0x10","calls":[
+              {"type":"staticcall","from":"0x00000000000000000000000000000000000000dd","to":"0x00000000000000000000000000000000000000ee","error":"execution reverted"}]},
+            {"type":"DELEGATECALL","from":"0x00000000000000000000000000000000000000cc","to":"0x00000000000000000000000000000000000000ff"}]}}]"#;
+        let raw = RawValue::from_string(tr.to_string()).unwrap();
+        let it = decode_traces(Some(&raw), &fb).unwrap();
+        let got: Vec<_> =
+            it.iter().map(|c| (c.trace_index, c.depth, c.call_type.as_str(), c.to.unwrap()[19])).collect();
+        assert_eq!(got, vec![(0, 1, "CALL", 0xdd), (1, 2, "STATICCALL", 0xee), (2, 1, "DELEGATECALL", 0xff)]);
+        assert_eq!(it[0].value, vec![5]);
+        assert_eq!(it[1].error.as_deref(), Some("execution reverted"));
+        assert_eq!(it[0].tx_hash8, [0x33; 8]);
+        let short = RawValue::from_string("[]".into()).unwrap();
+        assert!(matches!(decode_traces(Some(&short), &fb), Err(RpcError::NotReady(_))));
     }
 
     #[test]

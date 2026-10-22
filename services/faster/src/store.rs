@@ -23,6 +23,8 @@
 //! | token_rank | ^transfers u64 ‖ token 20        | (empty)                  |
 //! | token_meta | token 20                         | TokenMeta (not reorg-tracked) |
 //! | token_name | lowercase name/symbol ‖ 0 ‖ token | (empty), for search     |
+//! | itx        | number u64 ‖ tx u32 ‖ trace u32  | InternalTx (TRACE_CALLS) |
+//! | itx_addr   | addr 20 ‖ ^number ‖ ^tx ‖ ^trace | (empty)                  |
 //!
 //! Token balances are derived from transfers (ERC-20 amount, ERC-721 count
 //! of NFTs held, ERC-1155 amount per id), so they are exact only when
@@ -46,7 +48,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::*;
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 pub const ROLE_FROM: u8 = 1;
 pub const ROLE_TO: u8 = 2;
@@ -72,7 +74,11 @@ const CF_TOKEN: &str = "token";
 const CF_TOKEN_RANK: &str = "token_rank";
 const CF_TOKEN_META: &str = "token_meta";
 const CF_TOKEN_NAME: &str = "token_name";
-const CFS: [&str; 20] = [
+const CF_ITX: &str = "itx";
+const CF_ITX_ADDR: &str = "itx_addr";
+const CFS: [&str; 22] = [
+    CF_ITX,
+    CF_ITX_ADDR,
     CF_META,
     CF_BLOCKS,
     CF_BLOCK_HASH,
@@ -119,6 +125,23 @@ pub struct TokenMeta {
     pub name: Option<String>,
     pub symbol: Option<String>,
     pub decimals: Option<u8>,
+}
+
+pub fn k_itx(n: u64, tx: u32, trace: u32) -> [u8; 16] {
+    let mut k = [0u8; 16];
+    k[..8].copy_from_slice(&n.to_be_bytes());
+    k[8..12].copy_from_slice(&tx.to_be_bytes());
+    k[12..].copy_from_slice(&trace.to_be_bytes());
+    k
+}
+
+pub fn k_itx_addr(a: &Addr, n: u64, tx: u32, trace: u32) -> [u8; 36] {
+    let mut k = [0u8; 36];
+    k[..20].copy_from_slice(a);
+    k[20..28].copy_from_slice(&(!n).to_be_bytes());
+    k[28..32].copy_from_slice(&(!tx).to_be_bytes());
+    k[32..].copy_from_slice(&(!trace).to_be_bytes());
+    k
 }
 
 /// Transfer position key: block, log index, position in an ERC-1155 batch.
@@ -535,6 +558,22 @@ impl Store {
                 }
             }));
         }
+        // Internal calls (TRACE_CALLS): one writer.
+        let (cf_itx, cf_itxa) = (self.cf(CF_ITX), self.cf(CF_ITX_ADDR));
+        if blocks.iter().any(|b| !b.internals.is_empty()) {
+            jobs.push(Box::new(move |wb: &mut WriteBatch| {
+                for fb in blocks {
+                    let n = fb.block.number;
+                    for c in &fb.internals {
+                        wb.put_cf(cf_itx, k_itx(n, c.tx_index, c.trace_index), enc(c));
+                        wb.put_cf(cf_itxa, k_itx_addr(&c.from, n, c.tx_index, c.trace_index), []);
+                        if let Some(to) = c.to.filter(|t| *t != c.from) {
+                            wb.put_cf(cf_itxa, k_itx_addr(&to, n, c.tx_index, c.trace_index), []);
+                        }
+                    }
+                }
+            }));
+        }
         // Token transfers: one writer per index.
         let (cf_tt, cf_ttt, cf_tta) = (self.cf(CF_TT), self.cf(CF_TT_TOKEN), self.cf(CF_TT_ADDR));
         jobs.push(Box::new(move |wb: &mut WriteBatch| {
@@ -754,6 +793,70 @@ impl Store {
         self.write_data(blocks, &transfers)
     }
 
+    /// Raw internal-call rows of block `n` (no visibility checks; for rollback).
+    fn raw_internals(&self, n: u64) -> Result<Vec<InternalTx>> {
+        let mut ro = ReadOptions::default();
+        ro.set_iterate_upper_bound(k_itx(n + 1, 0, 0).to_vec());
+        let k = k_itx(n, 0, 0);
+        let mut out = Vec::new();
+        for kv in self.db.iterator_cf_opt(self.cf(CF_ITX), ro, IteratorMode::From(&k, Direction::Forward)) {
+            out.push(dec_rec(&kv?.1)?);
+        }
+        Ok(out)
+    }
+
+    /// Internal calls of a transaction, in call order.
+    pub fn tx_internals(&self, t: &TxRec) -> Result<Vec<InternalTx>> {
+        let mut ro = ReadOptions::default();
+        ro.set_iterate_upper_bound(k_itx(t.block_number, t.index + 1, 0).to_vec());
+        let k = k_itx(t.block_number, t.index, 0);
+        let mut out = Vec::new();
+        for kv in self.db.iterator_cf_opt(self.cf(CF_ITX), ro, IteratorMode::From(&k, Direction::Forward)) {
+            let c: InternalTx = dec_rec(&kv?.1)?;
+            if c.tx_hash8 == t.hash[..8] {
+                out.push(c);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Newest-first internal calls involving `a`, strictly older than
+    /// `before` (block, tx, trace). Returns (block, tx hash, call).
+    pub fn addr_internals(
+        &self,
+        a: &Addr,
+        before: Option<(u64, u32, u32)>,
+        limit: usize,
+    ) -> Result<Vec<(u64, H256, InternalTx)>> {
+        let start = match before {
+            Some((n, t, i)) => {
+                let mut k = k_itx_addr(a, n, t, i).to_vec();
+                k.push(0);
+                k
+            }
+            None => a.to_vec(),
+        };
+        let mut out = Vec::with_capacity(limit);
+        for kv in
+            self.db.iterator_cf(self.cf(CF_ITX_ADDR), IteratorMode::From(&start, Direction::Forward)).take(limit + 16)
+        {
+            let (k, _) = kv?;
+            if !k.starts_with(a) || out.len() >= limit {
+                break;
+            }
+            let n = !u64::from_be_bytes(k[20..28].try_into()?);
+            let ti = !u32::from_be_bytes(k[28..32].try_into()?);
+            let ci = !u32::from_be_bytes(k[32..36].try_into()?);
+            let (Some(tx), Some(c)) = (self.tx(n, ti)?, self.get_rec::<InternalTx>(CF_ITX, &k_itx(n, ti, ci))?) else {
+                continue;
+            };
+            if c.tx_hash8 == tx.hash[..8] {
+                out.push((n, tx.hash, c));
+            }
+        }
+        Ok(out)
+    }
+
     /// Raw transfer rows of block `n` (no visibility checks; for rollback).
     fn block_transfers(&self, n: u64) -> Result<Vec<crate::tokens::Transfer>> {
         let mut ro = ReadOptions::default();
@@ -796,6 +899,13 @@ impl Store {
             }
         }
         wb.delete_range_cf(self.cf(CF_TT), k_tt(n, 0, 0), k_tt(n + 1, 0, 0));
+        for c in self.raw_internals(n)? {
+            wb.delete_cf(self.cf(CF_ITX_ADDR), k_itx_addr(&c.from, n, c.tx_index, c.trace_index));
+            if let Some(to) = c.to {
+                wb.delete_cf(self.cf(CF_ITX_ADDR), k_itx_addr(&to, n, c.tx_index, c.trace_index));
+            }
+        }
+        wb.delete_range_cf(self.cf(CF_ITX), k_itx(n, 0, 0), k_itx(n + 1, 0, 0));
         let mut derived: Vec<DerivedOp> = Vec::new();
         for (k, prev) in &undo.bals {
             let cur = self.db.get_cf(self.cf(CF_BAL), k)?;
@@ -1479,6 +1589,7 @@ mod tests {
             },
             txs: recs,
             logs,
+            internals: vec![],
         }
     }
 
