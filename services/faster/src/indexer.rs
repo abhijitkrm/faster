@@ -64,6 +64,7 @@ impl Indexer {
         loop {
             let tip = retry("eth_blockNumber", || self.rpc.block_number()).await;
             self.status.tip.store(tip, Ordering::Relaxed);
+            crate::metrics::get().tip.store(tip, Ordering::Relaxed);
             let target = tip.saturating_sub(self.cfg.confirmations);
             let head = self.store.head()?;
             let next = head.map(|h| h.number + 1).unwrap_or(self.cfg.start_block);
@@ -168,6 +169,11 @@ impl Indexer {
         let txs: usize = blocks.iter().map(|b| b.txs.len()).sum();
         tracing::debug!(blocks = blocks.len(), txs, ms = t.elapsed().as_millis() as u64, "commit");
         let last = blocks.last().unwrap().block.number;
+        let m = crate::metrics::get();
+        m.commit.observe(t.elapsed());
+        m.blocks_indexed.fetch_add(blocks.len() as u64, Ordering::Relaxed);
+        m.txs_indexed.fetch_add(txs as u64, Ordering::Relaxed);
+        m.head.store(last, Ordering::Relaxed);
         self.status.head.store(last, Ordering::Relaxed);
         self.sink.committed(&blocks);
         Ok(())
@@ -186,6 +192,7 @@ impl Indexer {
             let store = self.store.clone();
             let new_head = tokio::task::spawn_blocking(move || store.rollback_head()).await??;
             depth += 1;
+            crate::metrics::get().rolled_back.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(rolled_back = head.number, depth, "reorg rollback");
             self.status.head.store(new_head.map(|h| h.number).unwrap_or(0), Ordering::Relaxed);
             if new_head.is_none() {
@@ -199,6 +206,8 @@ impl Indexer {
         }
         let head = self.store.head()?;
         tracing::warn!(depth, new_head = head.map(|h| h.number), "reorg resolved");
+        crate::metrics::get().reorgs.fetch_add(1, Ordering::Relaxed);
+        crate::metrics::get().head.store(head.map(|h| h.number).unwrap_or(0), Ordering::Relaxed);
         self.sink.reorged(head);
         Ok(())
     }

@@ -65,7 +65,23 @@ impl Rpc {
             .enumerate()
             .map(|(i, (m, p))| json!({"jsonrpc": "2.0", "id": i, "method": m, "params": p}))
             .collect();
-        let body = self.http.post(&self.url).json(&reqs).send().await?.bytes().await?;
+        let t = std::time::Instant::now();
+        let body = match self.http.post(&self.url).json(&reqs).send().await {
+            Ok(r) => r.bytes().await,
+            Err(e) => Err(e),
+        };
+        let m = crate::metrics::get();
+        m.rpc_latency.observe(t.elapsed());
+        let body = match body {
+            Ok(b) => {
+                m.rpc_ok.fetch_add(1, Ordering::Relaxed);
+                b
+            }
+            Err(e) => {
+                m.rpc_err.fetch_add(1, Ordering::Relaxed);
+                return Err(e.into());
+            }
+        };
         let resps: Vec<Resp> = match serde_json::from_slice(&body) {
             Ok(r) => r,
             Err(_) => {

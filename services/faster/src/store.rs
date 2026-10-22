@@ -468,6 +468,16 @@ impl Store {
         Ok(new_head)
     }
 
+    /// Consistent on-disk snapshot of the store (hard links to SST files, so
+    /// it is near-instant and shares disk with the live store). Start a
+    /// node with DATA_DIR pointing at a copy of it to restore.
+    pub fn checkpoint(&self, dir: &Path) -> Result<Option<Head>> {
+        let head = self.head()?;
+        std::fs::create_dir_all(dir)?;
+        rocksdb::checkpoint::Checkpoint::new(&self.db)?.create_checkpoint(dir.join("hot"))?;
+        Ok(head)
+    }
+
     // ---- reads ----
 
     pub fn block(&self, n: u64) -> Result<Option<BlockRec>> {

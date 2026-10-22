@@ -23,6 +23,13 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clob}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clob}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Metrics + /admin/checkpoint; reachable on the compose network only.
+      ADMIN_ADDR: 0.0.0.0:9100
+      BACKUP_DIR: /data/backups
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-100}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-200}
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
     volumes:
       - faster-data:/data
     stop_grace_period: 30s

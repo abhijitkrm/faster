@@ -7,9 +7,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use axum::extract::ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, Request, State};
-use axum::http::{header, HeaderValue, Method, StatusCode};
-use axum::middleware::{self, Next};
+use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -31,6 +31,7 @@ const WS_PING: Duration = Duration::from_secs(20);
 const WS_IDLE: Duration = Duration::from_secs(60);
 const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const RPC_CALL_TIMEOUT: Duration = Duration::from_secs(3);
+const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct Hub {
     store: Arc<Store>,
@@ -242,6 +243,7 @@ pub struct AppState {
     pub final_depth: u64,
     pub clob: Option<Arc<crate::clob::Clob>>,
     pub node_cache: Arc<NodeCache>,
+    pub max_ws_clients: usize,
 }
 
 /// Short-lived cache of node reads (balance, code) so hot address pages do
@@ -362,7 +364,7 @@ fn limit_or(q: &ListQ, def: usize, max: usize) -> usize {
     }
 }
 
-pub fn router(state: AppState) -> Router {
+pub fn router(state: AppState, limiter: Arc<crate::guard::Limiter>) -> Router {
     Router::new()
         .route("/", get(root))
         .route("/health", get(health))
@@ -385,26 +387,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/clob/pairs/{pair}/trades", get(crate::clob::pair_trades))
         .route("/api/clob/blocks/{height}", get(crate::clob::block))
         .route("/api/clob/{*rest}", get(crate::clob::unknown))
-        .layer(middleware::from_fn(cors))
+        // After routing, so metrics see the route template; the WebSocket
+        // upgrade answers immediately, so the timeout does not cut sockets.
+        .route_layer(middleware::from_fn_with_state(limiter, crate::guard::guard))
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(StatusCode::GATEWAY_TIMEOUT, HTTP_TIMEOUT))
+        .fallback(|| async { (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))) })
         .with_state(state)
-}
-
-async fn cors(req: Request, next: Next) -> Response {
-    if req.method() == Method::OPTIONS {
-        let mut r = StatusCode::NO_CONTENT.into_response();
-        add_cors(&mut r);
-        return r;
-    }
-    let mut r = next.run(req).await;
-    add_cors(&mut r);
-    r
-}
-
-fn add_cors(r: &mut Response) {
-    let h = r.headers_mut();
-    h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
-    h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST, OPTIONS"));
-    h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("Content-Type"));
 }
 
 async fn health(State(s): State<AppState>) -> Json<Value> {
@@ -603,6 +591,37 @@ async fn address_detail(State(s): State<AppState>, Path(addr): Path<String>, Que
     })))
 }
 
+// ---- admin (internal listener) ----
+
+/// Metrics and operations, served on ADMIN_ADDR (keep it off the public
+/// network).
+pub fn admin_router(store: Arc<Store>, backup_dir: std::path::PathBuf) -> Router {
+    Router::new()
+        .route(
+            "/metrics",
+            get(|| async {
+                ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], crate::metrics::get().render())
+            }),
+        )
+        .route(
+            "/admin/checkpoint",
+            axum::routing::post(move || {
+                let (store, dir) = (store.clone(), backup_dir.clone());
+                async move {
+                    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                    let path = dir.join(format!("checkpoint-{now}"));
+                    let p2 = path.clone();
+                    match tokio::task::spawn_blocking(move || store.checkpoint(&p2)).await {
+                        Ok(Ok(head)) => Json(json!({"path": path.display().to_string(), "head": head.map(|h| h.number)}))
+                            .into_response(),
+                        Ok(Err(e)) => ApiError::Internal(e).into_response(),
+                        Err(e) => ApiError::Internal(e.into()).into_response(),
+                    }
+                }
+            }),
+        )
+}
+
 // ---- WebSocket ----
 
 async fn root(
@@ -610,6 +629,9 @@ async fn root(
     ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Response {
     match ws {
+        Ok(_) if s.status.clients.load(Ordering::Relaxed) >= s.max_ws_clients => {
+            (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "too many WebSocket clients"}))).into_response()
+        }
         Ok(ws) => ws.on_upgrade(move |sock| client(s, sock)),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
@@ -620,6 +642,7 @@ async fn root(
 /// write is disconnected; the UI reconnects and gets a fresh init.
 async fn client(s: AppState, mut sock: WebSocket) {
     s.status.clients.fetch_add(1, Ordering::Relaxed);
+    crate::metrics::get().ws_clients.fetch_add(1, Ordering::Relaxed);
     let mut rx = s.hub.tx.subscribe();
     let reason = 'conn: {
         match s.hub.init_message() {
@@ -664,6 +687,10 @@ async fn client(s: AppState, mut sock: WebSocket) {
         }
     };
     tracing::debug!(reason, "ws client gone");
+    if reason == "slow client" {
+        crate::metrics::get().ws_dropped_slow.fetch_add(1, Ordering::Relaxed);
+    }
+    crate::metrics::get().ws_clients.fetch_sub(1, Ordering::Relaxed);
     s.status.clients.fetch_sub(1, Ordering::Relaxed);
 }
 

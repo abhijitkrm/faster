@@ -7,7 +7,9 @@ mod clob;
 mod clob_it;
 #[cfg(test)]
 mod e2e_test;
+mod guard;
 mod indexer;
+mod metrics;
 mod rpc;
 mod store;
 mod types;
@@ -73,6 +75,15 @@ async fn main() -> Result<()> {
     let rpc_timeout = Duration::from_millis(env("RPC_TIMEOUT_MS", 15_000)?);
     let ready_max_lag: u64 = env("READY_MAX_LAG", 10)?;
     let ch_url = env("CLICKHOUSE_URL", String::new())?;
+    let admin_addr = env("ADMIN_ADDR", "127.0.0.1:9100".to_string())?;
+    let backup_dir: PathBuf = env("BACKUP_DIR", data_dir.join("backups"))?;
+    let guard_cfg = guard::GuardConfig {
+        rate: env("RATE_LIMIT_RPS", 100.0)?,
+        burst: env("RATE_LIMIT_BURST", 200.0)?,
+        trust_proxy: env("TRUST_PROXY_HEADERS", false)?,
+        cors_origins: env("CORS_ORIGINS", "*".to_string())?.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+    };
+    let max_ws_clients: usize = env("MAX_WS_CLIENTS", 10_000)?;
 
     std::fs::create_dir_all(&data_dir).with_context(|| format!("create {}", data_dir.display()))?;
     let store = store::Store::open(
@@ -91,6 +102,7 @@ async fn main() -> Result<()> {
         ready_max_lag,
         final_depth: reorg_depth,
         node_cache: Default::default(),
+        max_ws_clients,
         clob: if ch_url.is_empty() {
             None
         } else {
@@ -103,12 +115,22 @@ async fn main() -> Result<()> {
         },
     };
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-    tracing::info!(port, rpc = %rpc_url, data = %data_dir.display(), ?icfg, "faster starting");
+    let admin = tokio::net::TcpListener::bind(&admin_addr).await.with_context(|| format!("bind ADMIN_ADDR {admin_addr}"))?;
+    let admin_app = api::admin_router(store.clone(), backup_dir);
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(admin, admin_app).await {
+            tracing::error!(err = %e, "admin listener");
+        }
+    });
+    let limiter = guard::Limiter::new(guard_cfg);
+    tokio::spawn(limiter.clone().sweep());
+    tracing::info!(port, admin = %admin_addr, rpc = %rpc_url, data = %data_dir.display(), ?icfg, "faster starting");
 
     let idx = indexer::Indexer { store, rpc, cfg: icfg, sink: hub.clone(), status };
     let indexer = tokio::spawn(idx.run());
     tokio::spawn(hub.clone().heartbeat());
-    let server = axum::serve(listener, api::router(state)).with_graceful_shutdown(shutdown_signal());
+    let app = api::router(state, limiter).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
 
     tokio::select! {
         r = server => r.context("http server")?,

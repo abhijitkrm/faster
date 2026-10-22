@@ -806,6 +806,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2724,6 +2725,7 @@ dependencies = [
  "http",
  "http-body",
  "pin-project-lite",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",

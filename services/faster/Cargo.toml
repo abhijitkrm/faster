@@ -19,6 +19,7 @@ ruint = "1.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
+tower-http = { version = "0.6", features = ["timeout"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
