@@ -93,8 +93,9 @@ func OrderID(h uint64, i int) uint64 { return h*100 + uint64(i) + 1 }
 // Gen builds height h's archive. Shape per height:
 //   - h%7 orders, statuses cycling open/partial/filled/rejected (rejected
 //     orders have order_id 0 and a reason)
-//   - one fill per partial/filled order, against order 0 of height h-1
-//     (resting maker), so traders appear as both maker and taker
+//   - one fill per partial/filled order, against the same-index order of
+//     height h-1 when that one exists and was not rejected (resting maker,
+//     same pair), so traders appear as both maker and taker
 //   - a cancel every 3rd height, an amend every 5th, a rejected cancel every
 //     11th
 //   - every 50th height a duplicate submission of order 0 (same hash,
@@ -109,7 +110,7 @@ func Gen(h uint64) *Block {
 		o := Order{
 			Hash:          hash32(1, h, uint64(i)),
 			Trader:        Trader(int(h*7+uint64(i)) % NumTraders),
-			PairID:        uint32(1 + (h+uint64(i))%3),
+			PairID:        uint32(1 + i%3),
 			ClientOrderID: h*10 + uint64(i),
 			OrderID:       OrderID(h, i),
 			IsBuy:         (h+uint64(i))%2 == 0,
@@ -132,14 +133,15 @@ func Gen(h uint64) *Block {
 			o.Reason = "insufficient balance"
 		}
 		b.Orders = append(b.Orders, o)
-		if o.Filled > 0 && h > 1 {
+		// The fill rests on order i of the previous height (same pair).
+		if o.Filled > 0 && h > 1 && i < int((h-1)%7) && statuses[(int(h-1)+i)%4] != "rejected" {
 			b.Fills = append(b.Fills, Fill{
 				Seq:          uint32(len(b.Fills)),
 				PairID:       o.PairID,
-				Maker:        Trader(int((h-1)*7) % NumTraders),
+				Maker:        Trader(int((h-1)*7+uint64(i)) % NumTraders),
 				Taker:        o.Trader,
 				TakerIsBuy:   o.IsBuy,
-				MakerOrderID: OrderID(h-1, 0),
+				MakerOrderID: OrderID(h-1, i),
 				TakerOrderID: o.OrderID,
 				Price:        o.Price,
 				Qty:          o.Filled,
@@ -153,13 +155,13 @@ func Gen(h uint64) *Block {
 	}
 	if h%3 == 0 && h > 1 {
 		b.Cancels = append(b.Cancels, Cancel{
-			Kind: "cancel", Hash: hash32(2, h), Trader: Trader(int((h-1)*7) % NumTraders), PairID: uint32(1 + (h-1)%3),
+			Kind: "cancel", Hash: hash32(2, h), Trader: Trader(int((h-1)*7) % NumTraders), PairID: 1,
 			ClientID: h, TargetOrderID: OrderID(h-1, 0), Status: "cancelled",
 		})
 	}
 	if h%5 == 0 && h > 1 {
 		b.Cancels = append(b.Cancels, Cancel{
-			Kind: "amend", Hash: hash32(3, h), Trader: Trader(int((h-2)*7) % NumTraders), PairID: uint32(1 + (h-2)%3),
+			Kind: "amend", Hash: hash32(3, h), Trader: Trader(int((h-2)*7) % NumTraders), PairID: 1,
 			ClientID: h + 1, TargetClient: (h - 2) * 10, Price: 999_000, Amount: 3, Status: "amended",
 		})
 	}

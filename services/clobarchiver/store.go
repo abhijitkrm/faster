@@ -92,7 +92,12 @@ func (s *CHStore) SetCheckpoint(ctx context.Context, h uint64) error {
 }
 
 // dataTables carry a height and a block_time column.
-var dataTables = []string{"orders", "cancels", "fills", "fills_by_trader", "item_hash", "blocks"}
+// Materialized views fill the re-sorted copies on insert, but a DELETE on a
+// source table does not propagate, so every table is repaired explicitly.
+var dataTables = []string{
+	"orders", "orders_by_trader", "cancels", "cancels_by_trader",
+	"fills", "fills_by_trader", "fills_by_order", "item_hash", "blocks",
+}
 
 // Repair deletes rows above cp. Block time is non-decreasing in height, so
 // rows above cp have block_time >= the time of the last loaded block; the
@@ -174,15 +179,16 @@ func (s *CHStore) insertGaps(ctx context.Context, gaps []Gap) error {
 
 func blockTime(b *Block) time.Time { return time.Unix(0, b.TimeNs).UTC() }
 
-// Insert writes the batch: data tables first, the per-block summary last.
+// Insert writes the batch to the base tables, the per-block summary last.
+// Materialized views (01-clob.sql) derive orders_by_trader,
+// cancels_by_trader, fills_by_trader, fills_by_order and item_hash server
+// side from each inserted block, so every row crosses the wire once.
 func (s *CHStore) Insert(ctx context.Context, bt *Batch) error {
 	// Every prepared batch holds a connection until sent or aborted.
 	var open []driver.Batch
 	defer func() {
 		for _, b := range open {
-			if !b.IsSent() {
-				_ = b.Abort()
-			}
+			abortUnsent(b)
 		}
 	}()
 	prep := func(q string) (driver.Batch, error) {
@@ -200,70 +206,51 @@ func (s *CHStore) Insert(ctx context.Context, bt *Batch) error {
 		nFills += len(b.Fills)
 	}
 
-	if nOrders+nCancels > 0 {
-		hb, err := prep("INSERT INTO " + s.t("item_hash") + " (hash, height, idx, kind, block_time, trader, pair_id)")
+	if nOrders > 0 {
+		ob, err := prep("INSERT INTO " + s.t("orders") +
+			" (height, idx, block_time, hash, trader, pair_id, client_order_id, order_id, is_buy, is_market, price, amount, timestamp_ns, status, filled, reason)")
 		if err != nil {
 			return err
 		}
-		if nOrders > 0 {
-			ob, err := prep("INSERT INTO " + s.t("orders") +
-				" (height, idx, block_time, hash, trader, pair_id, client_order_id, order_id, is_buy, is_market, price, amount, timestamp_ns, status, filled, reason)")
-			if err != nil {
-				return err
-			}
-			for _, b := range bt.Blocks {
-				ts := blockTime(b)
-				for i := range b.Orders {
-					o := &b.Orders[i]
-					if err := ob.Append(b.Height, uint32(i), ts, o.Hash[:], o.Trader[:], o.PairID, o.ClientOrderID, o.OrderID,
-						o.IsBuy, o.IsMarket, o.Price, o.Amount, o.TimestampNs, o.Status, o.Filled, o.Reason); err != nil {
-						return fmt.Errorf("orders append: %w", err)
-					}
-					if err := hb.Append(o.Hash[:], b.Height, uint32(i), "order", ts, o.Trader[:], o.PairID); err != nil {
-						return fmt.Errorf("item_hash append: %w", err)
-					}
+		for _, b := range bt.Blocks {
+			ts := blockTime(b)
+			for i := range b.Orders {
+				o := &b.Orders[i]
+				if err := ob.Append(b.Height, uint32(i), ts, o.Hash[:], o.Trader[:], o.PairID, o.ClientOrderID, o.OrderID,
+					o.IsBuy, o.IsMarket, o.Price, o.Amount, o.TimestampNs, o.Status, o.Filled, o.Reason); err != nil {
+					return fmt.Errorf("orders append: %w", err)
 				}
 			}
-			if err := ob.Send(); err != nil {
-				return fmt.Errorf("insert orders: %w", err)
-			}
 		}
-		if nCancels > 0 {
-			cb, err := prep("INSERT INTO " + s.t("cancels") +
-				" (height, idx, block_time, kind, hash, trader, pair_id, client_id, target_order_id, target_client, price, amount, status, reason)")
-			if err != nil {
-				return err
-			}
-			for _, b := range bt.Blocks {
-				ts := blockTime(b)
-				for i := range b.Cancels {
-					c := &b.Cancels[i]
-					if err := cb.Append(b.Height, uint32(i), ts, c.Kind, c.Hash[:], c.Trader[:], c.PairID, c.ClientID,
-						c.TargetOrderID, c.TargetClient, c.Price, c.Amount, c.Status, c.Reason); err != nil {
-						return fmt.Errorf("cancels append: %w", err)
-					}
-					if err := hb.Append(c.Hash[:], b.Height, uint32(i), c.Kind, ts, c.Trader[:], c.PairID); err != nil {
-						return fmt.Errorf("item_hash append: %w", err)
-					}
+		if err := ob.Send(); err != nil {
+			return fmt.Errorf("insert orders: %w", err)
+		}
+	}
+
+	if nCancels > 0 {
+		cb, err := prep("INSERT INTO " + s.t("cancels") +
+			" (height, idx, block_time, kind, hash, trader, pair_id, client_id, target_order_id, target_client, price, amount, status, reason)")
+		if err != nil {
+			return err
+		}
+		for _, b := range bt.Blocks {
+			ts := blockTime(b)
+			for i := range b.Cancels {
+				c := &b.Cancels[i]
+				if err := cb.Append(b.Height, uint32(i), ts, c.Kind, c.Hash[:], c.Trader[:], c.PairID, c.ClientID,
+					c.TargetOrderID, c.TargetClient, c.Price, c.Amount, c.Status, c.Reason); err != nil {
+					return fmt.Errorf("cancels append: %w", err)
 				}
 			}
-			if err := cb.Send(); err != nil {
-				return fmt.Errorf("insert cancels: %w", err)
-			}
 		}
-		if err := hb.Send(); err != nil {
-			return fmt.Errorf("insert item_hash: %w", err)
+		if err := cb.Send(); err != nil {
+			return fmt.Errorf("insert cancels: %w", err)
 		}
 	}
 
 	if nFills > 0 {
 		fb, err := prep("INSERT INTO " + s.t("fills") +
 			" (height, seq, block_time, pair_id, maker, taker, taker_is_buy, maker_order_id, taker_order_id, price, qty)")
-		if err != nil {
-			return err
-		}
-		tb, err := prep("INSERT INTO " + s.t("fills_by_trader") +
-			" (trader, height, seq, role, block_time, pair_id, order_id, counterparty, counter_order, is_buy, price, qty)")
 		if err != nil {
 			return err
 		}
@@ -275,21 +262,10 @@ func (s *CHStore) Insert(ctx context.Context, bt *Batch) error {
 					f.MakerOrderID, f.TakerOrderID, f.Price, f.Qty); err != nil {
 					return fmt.Errorf("fills append: %w", err)
 				}
-				if err := tb.Append(f.Maker[:], b.Height, f.Seq, "maker", ts, f.PairID, f.MakerOrderID,
-					f.Taker[:], f.TakerOrderID, !f.TakerIsBuy, f.Price, f.Qty); err != nil {
-					return fmt.Errorf("fills_by_trader append: %w", err)
-				}
-				if err := tb.Append(f.Taker[:], b.Height, f.Seq, "taker", ts, f.PairID, f.TakerOrderID,
-					f.Maker[:], f.MakerOrderID, f.TakerIsBuy, f.Price, f.Qty); err != nil {
-					return fmt.Errorf("fills_by_trader append: %w", err)
-				}
 			}
 		}
 		if err := fb.Send(); err != nil {
 			return fmt.Errorf("insert fills: %w", err)
-		}
-		if err := tb.Send(); err != nil {
-			return fmt.Errorf("insert fills_by_trader: %w", err)
 		}
 	}
 

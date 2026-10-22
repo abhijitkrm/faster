@@ -72,21 +72,12 @@ func TestClobClickHouseIntegration(t *testing.T) {
 		(11, 0, %s, 'amend', unhex('%s'), unhex('%s'), 1, 70, 101, 0, 999, 3, 'amended', ''),
 		(14, 0, %s, 'cancel', unhex('%s'), unhex('%s'), 1, 71, 101, 0, 0, 0, 'cancelled', '')`,
 		db, day1b, H3, A, day2, H5, A))
-	exec(fmt.Sprintf(`INSERT INTO %s.item_hash (hash, height, idx, kind, block_time, trader, pair_id) VALUES
-		(unhex('%s'), 10, 0, 'order', %s, unhex('%s'), 1), (unhex('%s'), 10, 1, 'order', %s, unhex('%s'), 1),
-		(unhex('%s'), 11, 0, 'order', %s, unhex('%s'), 1), (unhex('%s'), 12, 0, 'order', %s, unhex('%s'), 1),
-		(unhex('%s'), 11, 0, 'amend', %s, unhex('%s'), 1), (unhex('%s'), 14, 0, 'cancel', %s, unhex('%s'), 1)`,
-		db, H1, day1, A, H2, day1, B, H1, day1b, A, H4, day1c, C, H3, day1b, A, H5, day2, A))
 	exec(fmt.Sprintf(`INSERT INTO %s.fills (height, seq, block_time, pair_id, maker, taker, taker_is_buy, maker_order_id, taker_order_id, price, qty) VALUES
 		(10, 0, %s, 1, unhex('%s'), unhex('%s'), false, 101, 102, %s, 2),
 		(12, 0, %s, 1, unhex('%s'), unhex('%s'), true, 101, 103, 1000, 1)`,
 		db, day1, A, B, big, day1c, A, C))
-	exec(fmt.Sprintf(`INSERT INTO %s.fills_by_trader (trader, height, seq, role, block_time, pair_id, order_id, counterparty, counter_order, is_buy, price, qty) VALUES
-		(unhex('%s'), 10, 0, 'maker', %s, 1, 101, unhex('%s'), 102, true, %s, 2),
-		(unhex('%s'), 10, 0, 'taker', %s, 1, 102, unhex('%s'), 101, false, %s, 2),
-		(unhex('%s'), 12, 0, 'maker', %s, 1, 101, unhex('%s'), 103, false, 1000, 1),
-		(unhex('%s'), 12, 0, 'taker', %s, 1, 103, unhex('%s'), 101, true, 1000, 1)`,
-		db, A, day1, B, big, B, day1, A, big, A, day1c, C, C, day1c, A))
+	// item_hash, *_by_trader and fills_by_order are filled by the schema's
+	// materialized views.
 	exec(fmt.Sprintf(`INSERT INTO %s.blocks (height, block_time, orders, cancels, fills, rejected) VALUES
 		(10, %s, 2, 0, 1, 0), (11, %s, 1, 1, 0, 1), (12, %s, 1, 0, 1, 0), (14, %s, 0, 1, 0, 0)`, db, day1, day1b, day1c, day2))
 	exec(fmt.Sprintf(`INSERT INTO %s.gaps (from_height, to_height, reason, detected_at) VALUES (13, 13, 'missing', now64(3))`, db))

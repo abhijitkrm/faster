@@ -5,23 +5,33 @@
 -- served by services/api-go under /api/clob/*.
 --
 -- Write path: the loader inserts heights strictly in order, many heights per
--- INSERT (one part per table per batch, never per-row inserts), then advances
--- clob.archive_progress. Data arrives in height order, so parts of the
--- (height, ...)-sorted tables do not overlap and merges are cheap.
+-- INSERT (one part per table per batch, never per-row inserts) into the four
+-- base tables (orders, cancels, fills, blocks), then advances
+-- clob.archive_progress. Materialized views copy each inserted block,
+-- server side, into the re-sorted access-path tables (*_by_trader,
+-- fills_by_order, item_hash), so the loader ships every row once.
 --
--- Idempotency: every data table is a ReplacingMergeTree whose sort key is the
--- row's identity inside the chain ((height, idx) or (height, seq) plus the
--- access-path prefix), so a re-loaded height collapses into the same rows on
--- merge. On top of that the loader deletes rows above its checkpoint before
--- (re)loading (crash between INSERT and checkpoint, or an operator rewinding
--- the checkpoint), so normal reads never see duplicates and the hot queries
--- run without FINAL; the API adds a cheap LIMIT 1 BY on the few rows it
--- returns as a backstop.
+-- Why tables + materialized views and not PROJECTIONs: on 24.8 a projection of
+-- a ReplacingMergeTree is not deduplicated when the parent part is (verified:
+-- OPTIMIZE FINAL dedups the parent rows but the projection keeps both copies),
+-- and lightweight DELETE is refused on tables with projections. Separate
+-- ReplacingMergeTree tables each deduplicate on merge on their own key.
 --
--- Partitioning: data tables by day of block time (cheap TTL / drop of old
--- days, partition pruning for block lookups, which always know the block
--- time). The hash lookup table by month (lookups by hash cannot prune, so
--- fewer, larger partitions keep the per-lookup index probes low).
+-- Idempotency: every data table is a ReplacingMergeTree whose sort key ends in
+-- the row's identity inside the chain ((height, idx) or (height, seq[, role])),
+-- so a re-loaded height collapses into the same rows on merge. On top of that
+-- the loader deletes rows above its checkpoint from every table before
+-- (re)loading (crash between INSERT and checkpoint, failed partial insert, or
+-- an operator rewinding the checkpoint), so normal reads never see duplicates
+-- and hot queries run without FINAL; the API adds a cheap LIMIT 1 BY on the
+-- few rows it returns as a backstop.
+--
+-- Partitioning: the base tables (orders, cancels, fills) by day of block
+-- time (cheap TTL / drop of old days, partition pruning for block lookups,
+-- which always know the block time). The access-path tables (*_by_trader,
+-- fills_by_order, item_hash) are read by trader / order / hash, never by
+-- time, so they cannot prune: they use month partitions, so a lookup probes
+-- ~30x fewer partitions (and parts) than with day partitions.
 --
 -- Positions: idx = index of the item in the block's orders (or cancels)
 -- array, seq = index of the fill in the block. Together with height they are
@@ -30,11 +40,8 @@
 
 CREATE DATABASE IF NOT EXISTS clob;
 
--- One row per executed placement.
--- Main order (height, idx): block contents and the point read after a hash
--- lookup touch one granule. Projection by_trader serves "a trader's orders,
--- newest first" (a projection rather than a second table so the two copies are
--- written atomically by the same INSERT).
+-- One row per executed placement, in block order: block contents and the
+-- point read after a hash lookup touch one granule of one partition.
 CREATE TABLE IF NOT EXISTS clob.orders
 (
     height          UInt64 CODEC(Delta, ZSTD(1)),
@@ -52,17 +59,23 @@ CREATE TABLE IF NOT EXISTS clob.orders
     timestamp_ns    Int64 CODEC(Delta, ZSTD(1)),
     status          Enum8('open' = 1, 'partial' = 2, 'filled' = 3, 'rejected' = 4, 'cancelled' = 5, 'amended' = 6),
     filled          UInt64 CODEC(ZSTD(1)),
-    reason          LowCardinality(String),
-    PROJECTION by_trader (SELECT * ORDER BY trader, height, idx)
+    reason          LowCardinality(String)
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(block_time)
-ORDER BY (height, idx)
-SETTINGS index_granularity = 8192,
-         deduplicate_merge_projection_mode = 'rebuild';
+ORDER BY (height, idx);
 
--- Cancels and amends (kind). An amend carries its new price/amount; a cancel
--- has them 0. Same layout and projection as orders.
+-- "A trader's orders, newest first": same rows sorted by trader.
+CREATE TABLE IF NOT EXISTS clob.orders_by_trader AS clob.orders
+ENGINE = ReplacingMergeTree
+PARTITION BY toYYYYMM(block_time)
+ORDER BY (trader, height, idx);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS clob.orders_by_trader_mv TO clob.orders_by_trader
+AS SELECT * FROM clob.orders;
+
+-- Cancels and amends (kind). An amend carries its new price/amount, a cancel
+-- has them 0.
 CREATE TABLE IF NOT EXISTS clob.cancels
 (
     height          UInt64 CODEC(Delta, ZSTD(1)),
@@ -78,16 +91,21 @@ CREATE TABLE IF NOT EXISTS clob.cancels
     price           UInt64 CODEC(ZSTD(1)),
     amount          UInt64 CODEC(ZSTD(1)),
     status          Enum8('open' = 1, 'partial' = 2, 'filled' = 3, 'rejected' = 4, 'cancelled' = 5, 'amended' = 6),
-    reason          LowCardinality(String),
-    PROJECTION by_trader (SELECT * ORDER BY trader, height, idx)
+    reason          LowCardinality(String)
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(block_time)
-ORDER BY (height, idx)
-SETTINGS index_granularity = 8192,
-         deduplicate_merge_projection_mode = 'rebuild';
+ORDER BY (height, idx);
 
--- Fills (trades), in execution order. Main order (pair_id, height, seq) is the
+CREATE TABLE IF NOT EXISTS clob.cancels_by_trader AS clob.cancels
+ENGINE = ReplacingMergeTree
+PARTITION BY toYYYYMM(block_time)
+ORDER BY (trader, height, idx);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS clob.cancels_by_trader_mv TO clob.cancels_by_trader
+AS SELECT * FROM clob.cancels;
+
+-- Fills (trades), in execution order. Sort key (pair_id, height, seq) is the
 -- pair trade tape, newest first (read in reverse key order). A block's fills
 -- are read with the block's time pinned (one partition), then the per-pair
 -- ranges of that partition.
@@ -107,16 +125,13 @@ CREATE TABLE IF NOT EXISTS clob.fills
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(block_time)
-ORDER BY (pair_id, height, seq)
-SETTINGS index_granularity = 8192;
+ORDER BY (pair_id, height, seq);
 
 -- Fills from each participant's side: two rows per fill (role maker and role
--- taker; a self-trade yields both rows for the same trader). A separate table
--- rather than two projections on clob.fills because "fills where I am maker OR
--- taker, newest first" is then one sorted range read instead of a UNION of two
--- projection reads merged and re-sorted. order_id is the participant's own
--- order in the fill; projection by_order serves "fills of this order" for the
--- order page without scanning the trader's whole history.
+-- taker; a self-trade yields both rows for the same trader), so "fills where
+-- I am maker OR taker, newest first" is one sorted range read instead of a
+-- UNION of two reads merged and re-sorted. order_id is the participant's own
+-- order in the fill; is_buy the participant's side.
 CREATE TABLE IF NOT EXISTS clob.fills_by_trader
 (
     trader        FixedString(20) CODEC(ZSTD(1)),
@@ -128,16 +143,40 @@ CREATE TABLE IF NOT EXISTS clob.fills_by_trader
     order_id      UInt64 CODEC(ZSTD(1)),
     counterparty  FixedString(20) CODEC(ZSTD(1)),
     counter_order UInt64 CODEC(ZSTD(1)),
-    is_buy        Bool,          -- the participant's side
+    is_buy        Bool,
     price         UInt64 CODEC(ZSTD(1)),
-    qty           UInt64 CODEC(ZSTD(1)),
-    PROJECTION by_order (SELECT * ORDER BY pair_id, order_id, height, seq, role)
+    qty           UInt64 CODEC(ZSTD(1))
 )
 ENGINE = ReplacingMergeTree
-PARTITION BY toYYYYMMDD(block_time)
-ORDER BY (trader, height, seq, role)
-SETTINGS index_granularity = 8192,
-         deduplicate_merge_projection_mode = 'rebuild';
+PARTITION BY toYYYYMM(block_time)
+ORDER BY (trader, height, seq, role);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS clob.fills_by_trader_mv TO clob.fills_by_trader
+AS SELECT
+    if(r = 0, maker, taker)                         AS trader,
+    height,
+    seq,
+    CAST(toInt8(r), 'Enum8(\'maker\' = 0, \'taker\' = 1)') AS role,
+    block_time,
+    pair_id,
+    if(r = 0, maker_order_id, taker_order_id)       AS order_id,
+    if(r = 0, taker, maker)                         AS counterparty,
+    if(r = 0, taker_order_id, maker_order_id)       AS counter_order,
+    if(r = 0, NOT taker_is_buy, taker_is_buy)       AS is_buy,
+    price,
+    qty
+FROM clob.fills
+ARRAY JOIN [0, 1] AS r;
+
+-- "Fills of this order" for the order page, without scanning the trader's
+-- whole history: the same rows keyed by (pair, order).
+CREATE TABLE IF NOT EXISTS clob.fills_by_order AS clob.fills_by_trader
+ENGINE = ReplacingMergeTree
+PARTITION BY toYYYYMM(block_time)
+ORDER BY (pair_id, order_id, height, seq, role);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS clob.fills_by_order_mv TO clob.fills_by_order
+AS SELECT * FROM clob.fills_by_trader;
 
 -- Point lookup by item hash (orders, cancels and amends): narrow rows sorted
 -- by hash pointing at the item's (block_time, height, idx), so the follow-up
@@ -157,6 +196,16 @@ PARTITION BY toYYYYMM(block_time)
 ORDER BY (hash, height, kind, idx)
 SETTINGS index_granularity = 4096;
 
+CREATE MATERIALIZED VIEW IF NOT EXISTS clob.item_hash_orders_mv TO clob.item_hash
+AS SELECT hash, height, idx, CAST('order', 'Enum8(\'order\' = 0, \'cancel\' = 1, \'amend\' = 2)') AS kind,
+          block_time, trader, pair_id
+FROM clob.orders;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS clob.item_hash_cancels_mv TO clob.item_hash
+AS SELECT hash, height, idx, CAST(toString(kind), 'Enum8(\'order\' = 0, \'cancel\' = 1, \'amend\' = 2)') AS kind,
+          block_time, trader, pair_id
+FROM clob.cancels;
+
 -- Per-block summary: one row for every loaded height (also empty ones), so
 -- "loaded, nothing there" differs from "not loaded". Gives the block's time
 -- for partition pruning, the block page counts, and stats.
@@ -173,7 +222,7 @@ ENGINE = ReplacingMergeTree
 ORDER BY height;
 
 -- Loader checkpoint: the highest height whose rows are fully inserted. Append
--- only; the current value is argMax(height, updated_at) (no FINAL needed). To
+-- only, the current value is argMax(height, updated_at) (no FINAL needed). To
 -- rewind, insert a lower height: the loader deletes rows above it and reloads.
 CREATE TABLE IF NOT EXISTS clob.archive_progress
 (

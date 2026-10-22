@@ -174,9 +174,12 @@ func expectedCounts(from, to uint64, gaps []uint64) map[string]uint64 {
 		w["blocks"]++
 		w["orders"] += uint64(len(b.Orders))
 		w["cancels"] += uint64(len(b.Cancels))
+		w["orders_by_trader"] += uint64(len(b.Orders))
+		w["cancels_by_trader"] += uint64(len(b.Cancels))
 		w["item_hash"] += uint64(len(b.Orders) + len(b.Cancels))
 		w["fills"] += uint64(len(b.Fills))
 		w["fills_by_trader"] += 2 * uint64(len(b.Fills))
+		w["fills_by_order"] += 2 * uint64(len(b.Fills))
 	}
 	return w
 }

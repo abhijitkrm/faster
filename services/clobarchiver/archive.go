@@ -108,10 +108,11 @@ var (
 	cancelStatus  = map[string]bool{"cancelled": true, "amended": true, "rejected": true}
 )
 
-// Rows is the number of data rows the block produces across all tables
-// (used to size insert batches).
+// Rows is the number of rows the block sends to ClickHouse (its blocks row
+// plus orders, cancels and fills; materialized views add the re-sorted
+// copies server side). Used to size insert batches.
 func (b *Block) Rows() int {
-	return 1 + 2*len(b.Orders) + 2*len(b.Cancels) + 3*len(b.Fills)
+	return 1 + len(b.Orders) + len(b.Cancels) + len(b.Fills)
 }
 
 // Validate checks enum values so a contract change fails loudly instead of

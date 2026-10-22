@@ -67,7 +67,7 @@ func TestDecodeDocExample(t *testing.T) {
 		f.TakerOrderID != 1001 || f.Price != 1000000 || f.Qty != 2 {
 		t.Fatalf("fill: %+v", f)
 	}
-	if got := b.Rows(); got != 1+2+2+3 {
+	if got := b.Rows(); got != 1+1+1+1 {
 		t.Fatalf("rows = %d", got)
 	}
 }

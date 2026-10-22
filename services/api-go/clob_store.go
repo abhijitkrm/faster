@@ -197,7 +197,7 @@ func scanTraderFills(rows driver.Rows) ([]clobTraderFill, error) {
 
 func (s *chClobStore) TraderOrders(ctx context.Context, trader []byte, before clobCursor, limit int) ([]clobOrder, error) {
 	rows, err := s.query(ctx, cursorParams(before, "trader", hex.EncodeToString(trader), "lim", strconv.Itoa(limit)), `
-		SELECT `+orderCols+` FROM `+s.t("orders")+`
+		SELECT `+orderCols+` FROM `+s.t("orders_by_trader")+`
 		WHERE trader = unhex({trader:String})
 		  AND height <= {bh:UInt64} AND (height < {bh:UInt64} OR idx < {bp:UInt64})
 		ORDER BY height DESC, idx DESC
@@ -211,7 +211,7 @@ func (s *chClobStore) TraderOrders(ctx context.Context, trader []byte, before cl
 
 func (s *chClobStore) TraderCancels(ctx context.Context, trader []byte, before clobCursor, limit int) ([]clobCancel, error) {
 	rows, err := s.query(ctx, cursorParams(before, "trader", hex.EncodeToString(trader), "lim", strconv.Itoa(limit)), `
-		SELECT `+cancelCols+` FROM `+s.t("cancels")+`
+		SELECT `+cancelCols+` FROM `+s.t("cancels_by_trader")+`
 		WHERE trader = unhex({trader:String})
 		  AND height <= {bh:UInt64} AND (height < {bh:UInt64} OR idx < {bp:UInt64})
 		ORDER BY height DESC, idx DESC
@@ -336,7 +336,7 @@ func (s *chClobStore) ItemByHash(ctx context.Context, hash []byte) (*clobItemRes
 		if pick.OrderID != "0" {
 			rows, err := s.query(ctx, params("pair", u64(uint64(pick.PairID)), "oid", pick.OrderID,
 				"trader", pick.Trader[2:], "h", u64(pick.Height)), `
-				SELECT `+traderFillCols+` FROM `+s.t("fills_by_trader")+`
+				SELECT `+traderFillCols+` FROM `+s.t("fills_by_order")+`
 				WHERE pair_id = {pair:UInt32} AND order_id = {oid:UInt64}
 				  AND trader = unhex({trader:String}) AND height >= {h:UInt64}
 				ORDER BY height, seq, role

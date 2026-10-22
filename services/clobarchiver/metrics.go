@@ -17,7 +17,7 @@ type Metrics struct {
 	orders     atomic.Uint64
 	cancels    atomic.Uint64
 	fills      atomic.Uint64
-	rows       atomic.Uint64 // rows written across all tables
+	rows       atomic.Uint64 // rows sent to the base tables
 	gapHeights atomic.Uint64
 	flushes    atomic.Uint64
 	flushNanos atomic.Uint64
@@ -61,7 +61,7 @@ func (m *Metrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c("clobarchiver_orders_total", "Order rows loaded.", m.orders.Load())
 	c("clobarchiver_cancels_total", "Cancel/amend rows loaded.", m.cancels.Load())
 	c("clobarchiver_fills_total", "Fill rows loaded.", m.fills.Load())
-	c("clobarchiver_rows_total", "Rows written across all tables.", m.rows.Load())
+	c("clobarchiver_rows_total", "Rows sent to the base tables (views add the derived copies).", m.rows.Load())
 	c("clobarchiver_gap_heights_total", "Heights the node did not hold.", m.gapHeights.Load())
 	c("clobarchiver_flushes_total", "Insert batches committed.", m.flushes.Load())
 	fmt.Fprintf(w, "# HELP clobarchiver_flush_seconds_total Time spent in committed inserts.\n# TYPE clobarchiver_flush_seconds_total counter\nclobarchiver_flush_seconds_total %.3f\n", float64(m.flushNanos.Load())/1e9)
