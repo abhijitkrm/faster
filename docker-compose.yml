@@ -67,6 +67,66 @@ services:
     networks:
       - explorer-network
 
+  # ClickHouse: CLOB history archive (database/clickhouse/*.sql applied on first start)
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: faster-clickhouse
+    environment:
+      CLICKHOUSE_DB: clob
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clob}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clob}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./database/clickhouse:/docker-entrypoint-initdb.d:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+      nproc: 65535
+    cap_add:
+      - SYS_NICE
+      - IPC_LOCK
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user \"$$CLICKHOUSE_USER\" --password \"$$CLICKHOUSE_PASSWORD\" -q 'SELECT 1' >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - explorer-network
+
+  # CLOB archiver: node clob_getBlockArchive -> ClickHouse
+  clobarchiver:
+    build:
+      context: ./services/clobarchiver
+      dockerfile: Dockerfile
+    image: faster:clobarchiver
+    container_name: faster-clobarchiver
+    environment:
+      NODE_RPC: ${NODE_RPC:-http://host.docker.internal:8545}
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_DB: clob
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clob}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clob}
+      FETCH_WORKERS: ${CLOB_FETCH_WORKERS:-8}
+      BATCH_MAX_ROWS: ${CLOB_BATCH_MAX_ROWS:-100000}
+      BATCH_MAX_HEIGHTS: ${CLOB_BATCH_MAX_HEIGHTS:-1000}
+      POLL_MS: ${CLOB_POLL_MS:-1000}
+      START_HEIGHT: ${CLOB_START_HEIGHT:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - explorer-network
+
   # API Service (Go)
   api:
     build:
@@ -82,6 +142,10 @@ services:
       RPC_URL: ${RPC_URL}
       PORT: 3000
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      CLICKHOUSE_ADDR: ${API_CLICKHOUSE_ADDR:-clickhouse:9000}
+      CLICKHOUSE_DB: clob
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clob}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clob}
     depends_on:
       postgresql:
         condition: service_healthy
@@ -119,6 +183,8 @@ volumes:
   postgres-data:
     driver: local
   redis-data:
+    driver: local
+  clickhouse-data:
     driver: local
 
 networks:
