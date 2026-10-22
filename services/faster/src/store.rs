@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::*;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 pub const ROLE_FROM: u8 = 1;
 pub const ROLE_TO: u8 = 2;
@@ -46,7 +46,9 @@ const CF_LOGS: &str = "logs";
 const CF_ADDR_TX: &str = "addr_tx";
 const CF_ADDR: &str = "addr";
 const CF_UNDO: &str = "undo";
-const CFS: [&str; 9] = [CF_META, CF_BLOCKS, CF_BLOCK_HASH, CF_TXS, CF_TX_HASH, CF_LOGS, CF_ADDR_TX, CF_ADDR, CF_UNDO];
+const CF_ADDR_RANK: &str = "addr_rank";
+const CFS: [&str; 10] =
+    [CF_META, CF_BLOCKS, CF_BLOCK_HASH, CF_TXS, CF_TX_HASH, CF_LOGS, CF_ADDR_TX, CF_ADDR, CF_UNDO, CF_ADDR_RANK];
 
 #[derive(Serialize, Deserialize, Default)]
 struct Undo {
@@ -85,6 +87,14 @@ pub fn k_num_idx(n: u64, i: u32) -> [u8; 12] {
     let mut k = [0u8; 12];
     k[..8].copy_from_slice(&n.to_be_bytes());
     k[8..].copy_from_slice(&i.to_be_bytes());
+    k
+}
+
+/// Ranking key: highest tx count first, then address.
+pub fn k_rank(count: u64, a: &Addr) -> [u8; 28] {
+    let mut k = [0u8; 28];
+    k[..8].copy_from_slice(&(!count).to_be_bytes());
+    k[8..].copy_from_slice(a);
     k
 }
 
@@ -211,6 +221,7 @@ impl Store {
     /// A crash between the phases leaves rows above the head. Reads never look
     /// above the head and verify hash-index hits, and re-indexing overwrites
     /// the rows, so they are invisible.
+    #[cfg(test)]
     pub fn apply(&self, blocks: &[FullBlock]) -> Result<()> {
         self.apply_at(blocks, None)
     }
@@ -334,6 +345,7 @@ impl Store {
                 addrs.insert(*a, Some(dec_rec(&v)?));
             }
         }
+        let before = addrs.clone();
         let mut wb = WriteBatch::default();
         let cf_undo = self.cf(CF_UNDO);
         for fb in blocks {
@@ -377,9 +389,14 @@ impl Store {
             }
             expect = Some((b.number + 1, b.hash));
         }
+        let cf_rank = self.cf(CF_ADDR_RANK);
         for (a, info) in &addrs {
             if let Some(info) = info {
                 wb.put_cf(cf_addr, a, enc(info));
+                if let Some(Some(old)) = before.get(a) {
+                    wb.delete_cf(cf_rank, k_rank(old.tx_count, a));
+                }
+                wb.put_cf(cf_rank, k_rank(info.tx_count, a), []);
             }
         }
         let new_head = Head { number: last.block.number, hash: last.block.hash };
@@ -414,9 +431,16 @@ impl Store {
             }
         }
         wb.delete_range_cf(&self.cf(CF_LOGS), k_num_idx(n, 0), k_num_idx(n + 1, 0));
+        let cf_rank = self.cf(CF_ADDR_RANK);
         for (a, prev) in &undo.addrs {
+            if let Some(cur) = self.addr_info(a)? {
+                wb.delete_cf(cf_rank, k_rank(cur.tx_count, a));
+            }
             match prev {
-                Some(info) => wb.put_cf(&self.cf(CF_ADDR), a, enc(info)),
+                Some(info) => {
+                    wb.put_cf(&self.cf(CF_ADDR), a, enc(info));
+                    wb.put_cf(cf_rank, k_rank(info.tx_count, a), []);
+                }
                 None => wb.delete_cf(&self.cf(CF_ADDR), a),
             }
         }
@@ -487,15 +511,21 @@ impl Store {
         Ok(out)
     }
 
+    #[cfg(test)]
     pub fn block_txs(&self, n: u64) -> Result<Vec<TxRec>> {
+        self.block_txs_page(n, 0, usize::MAX)
+    }
+
+    /// Transactions `offset..offset+limit` of block `n`, in index order.
+    pub fn block_txs_page(&self, n: u64, offset: usize, limit: usize) -> Result<Vec<TxRec>> {
         let Some(b) = self.block(n)? else { return Ok(Vec::new()) };
+        let start = (offset.min(b.tx_count as usize)) as u32;
+        let end = (start as usize + limit).min(b.tx_count as usize) as u32;
         let mut ro = ReadOptions::default();
-        // Bounded by the block's own count: a crash before a reorg can leave
-        // extra rows from the orphaned block past it.
-        ro.set_iterate_upper_bound(k_num_idx(n, b.tx_count).to_vec());
-        let k = k_num_idx(n, 0);
-        let mut out = Vec::new();
-        for kv in self.db.iterator_cf_opt(&self.cf(CF_TXS), ro, IteratorMode::From(&k, Direction::Forward)) {
+        ro.set_iterate_upper_bound(k_num_idx(n, end).to_vec());
+        let k = k_num_idx(n, start);
+        let mut out = Vec::with_capacity((end - start) as usize);
+        for kv in self.db.iterator_cf_opt(self.cf(CF_TXS), ro, IteratorMode::From(&k, Direction::Forward)) {
             let (_, v) = kv?;
             out.push(dec_rec(&v)?);
         }
@@ -567,6 +597,10 @@ impl Store {
 
     /// Newest-first transactions involving `a`, skipping `offset`.
     pub fn addr_txs(&self, a: &Addr, offset: usize, limit: usize) -> Result<Vec<TxRec>> {
+        self.addr_txs_from(a, a, offset, limit)
+    }
+
+    fn addr_txs_from(&self, a: &Addr, start: &[u8], offset: usize, limit: usize) -> Result<Vec<TxRec>> {
         let mut ro = ReadOptions::default();
         let mut upper = [0u8; 20];
         upper.copy_from_slice(a);
@@ -586,7 +620,7 @@ impl Store {
         let mut keys = Vec::with_capacity(limit);
         for kv in self
             .db
-            .iterator_cf_opt(&self.cf(CF_ADDR_TX), ro, IteratorMode::From(a, Direction::Forward))
+            .iterator_cf_opt(&self.cf(CF_ADDR_TX), ro, IteratorMode::From(start, Direction::Forward))
             .skip(offset)
             .take(limit)
         {
@@ -620,6 +654,35 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// Addresses with the most transactions, highest first.
+    pub fn top_addrs(&self, offset: usize, limit: usize) -> Result<Vec<(Addr, AddrInfo)>> {
+        let mut out = Vec::with_capacity(limit);
+        for kv in self.db.iterator_cf(self.cf(CF_ADDR_RANK), IteratorMode::Start).skip(offset).take(limit) {
+            let (k, _) = kv?;
+            let a: Addr = k[8..28].try_into()?;
+            if let Some(i) = self.addr_info(&a)? {
+                out.push((a, i));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Newest-first transactions involving `a` strictly older than `before`
+    /// (block, index), or from the newest when None. Cost is independent of
+    /// how deep the page is.
+    pub fn addr_txs_before(&self, a: &Addr, before: Option<(u64, u32)>, limit: usize) -> Result<Vec<TxRec>> {
+        let start = match before {
+            Some((n, i)) => {
+                // Next key after (n, i) in newest-first order.
+                let mut k = k_addr_tx(a, n, i).to_vec();
+                k.push(0);
+                k
+            }
+            None => a.to_vec(),
+        };
+        self.addr_txs_from(a, &start, 0, limit)
     }
 
     /// Addresses whose hex form starts with `prefix` (lower-case, no 0x).
@@ -747,6 +810,13 @@ mod tests {
         assert_eq!(s.addrs_with_prefix("0909", 5).unwrap().len(), 1);
         assert_eq!(s.addrs_with_prefix("090", 5).unwrap().len(), 1);
         assert_eq!(s.addrs_with_prefix("0a", 5).unwrap().len(), 0);
+        let top: Vec<_> = s.top_addrs(0, 10).unwrap().iter().map(|(a, i)| (a[0], i.tx_count)).collect();
+        assert_eq!(top, vec![(1, 2), (2, 2), (9, 1)]);
+        let page1 = s.addr_txs_before(&a(2), None, 1).unwrap();
+        assert_eq!((page1[0].block_number, page1[0].index), (1, 0));
+        let page2 = s.addr_txs_before(&a(2), Some((1, 0)), 5).unwrap();
+        assert_eq!(page2.iter().map(|t| (t.block_number, t.index)).collect::<Vec<_>>(), vec![(0, 0)]);
+        assert!(s.addr_txs_before(&a(2), Some((0, 0)), 5).unwrap().is_empty());
     }
 
     #[test]
@@ -768,6 +838,8 @@ mod tests {
         assert_eq!(s.addr_info(&a(1)).unwrap(), before_a1);
         assert!(s.addr_info(&a(3)).unwrap().is_none());
         assert!(s.addr_info(&a(4)).unwrap().is_none());
+        let top: Vec<_> = s.top_addrs(0, 10).unwrap().iter().map(|(a, i)| (a[0], i.tx_count)).collect();
+        assert_eq!(top, vec![(1, 1), (2, 1)], "ranking not rolled back");
         assert!(s.tx_by_hash(&tx2).unwrap().is_none());
         assert!(s.block(1).unwrap().is_none());
         assert!(s.block_by_hash(&h(1, 1)).unwrap().is_none());

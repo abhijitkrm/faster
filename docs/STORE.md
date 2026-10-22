@@ -22,6 +22,7 @@ complement, which turns an ascending key order into newest-first.
 | `addr_tx` | address 20 ‖ ^number ‖ ^index | role bits (from / to / created) |
 | `addr` | address 20 | tx count, first/last seen, contract flag, creating tx |
 | `undo` | number u64 | address and counter state before the block |
+| `addr_rank` | ^tx_count u64 ‖ address 20 | (empty) — addresses by activity |
 
 Records are bincode; hashes and addresses are raw bytes; 256-bit values are
 minimal big-endian bytes. `block_hash`, `tx_hash` and `addr` have bloom
@@ -89,12 +90,23 @@ Same routes and JSON field names as the old api-go, so the UI is unchanged:
 WebSocket on `/`. `/api/clob/*` is proxied to `CLOB_API_URL` (api-go) until
 the CLOB API moves into this process.
 
+Additions over api-go:
+
+- `before=<block>:<index>` keyset cursor on `/api/addresses/{addr}` and
+  `/api/transactions/address/{addr}`; responses carry `next_cursor`. Cost does
+  not grow with depth (0.16 ms at 100K deep vs 13 ms with `page=4000`).
+- `/api/blocks/{id}` inlines at most 500 txs (`transactions_truncated`); the
+  rest via `/api/blocks/{id}/transactions?offset&limit` (limit ≤ 1000).
+- `/api/addresses?limit&offset`: addresses by transaction count.
+- `Cache-Control: public, max-age=86400, immutable` on blocks/txs more than
+  `REORG_DEPTH` below the head, `no-cache` otherwise.
+- Balance (2 s) and code (60 s) from the node are cached in process.
+
 Field changes from api-go: `gas_price` is the price actually paid
 (`effectiveGasPrice` when the node reports it); new fields
 `effective_gas_price`, `transaction_index`, `logs_count`, `base_fee_per_gas`;
 block transactions are ordered by index (api-go sorted by nonce); invalid
-input returns 400 instead of silently reading block 0; `/api/addresses`
-(global ranking) returns 404 because there is no ranking index yet.
+input returns 400 instead of silently reading block 0.
 
 WebSocket: each client is served by one task that owns the socket (no
 concurrent writes). The server pings every 20 s and drops clients that are

@@ -143,6 +143,12 @@ fn check_matches_chain(store: &Store, c: &Chain) {
     assert!(store.block(tip).unwrap().is_none());
     let cnt = store.counters().unwrap();
     assert_eq!(cnt, Counters { blocks: tip, txs: tip, logs: tip, addresses: per_addr.len() as u64 });
+    let ranked = store.top_addrs(0, 10_000).unwrap();
+    assert_eq!(ranked.len(), per_addr.len(), "ranking has stale or missing entries");
+    assert!(ranked.windows(2).all(|w| w[0].1.tx_count >= w[1].1.tx_count));
+    for (a, i) in &ranked {
+        assert_eq!(per_addr[&hex0x(a)], i.tx_count, "rank entry of {}", hex0x(a));
+    }
     for (a, want) in &per_addr {
         let info = store.addr_info(&parse_fixed::<20>(a).unwrap()).unwrap().expect("addr info");
         assert_eq!(info.tx_count, *want, "tx_count of {a}");

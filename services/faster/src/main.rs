@@ -86,6 +86,8 @@ async fn main() -> Result<()> {
         hub: hub.clone(),
         status: status.clone(),
         ready_max_lag,
+        final_depth: reorg_depth,
+        node_cache: Default::default(),
         clob: if clob_url.is_empty() {
             None
         } else {

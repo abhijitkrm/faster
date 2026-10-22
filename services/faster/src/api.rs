@@ -238,7 +238,83 @@ pub struct AppState {
     pub hub: Arc<Hub>,
     pub status: Arc<Status>,
     pub ready_max_lag: u64,
+    /// Blocks this far below the head can no longer change (REORG_DEPTH).
+    pub final_depth: u64,
     pub clob: Option<ClobProxy>,
+    pub node_cache: Arc<NodeCache>,
+}
+
+/// Short-lived cache of node reads (balance, code) so hot address pages do
+/// not hit the node on every request.
+#[derive(Default)]
+pub struct NodeCache {
+    map: std::sync::Mutex<std::collections::HashMap<(u8, Addr), (Instant, Arc<Vec<u8>>)>>,
+}
+
+const BALANCE_TTL: Duration = Duration::from_secs(2);
+const CODE_TTL: Duration = Duration::from_secs(60);
+const NODE_CACHE_MAX: usize = 100_000;
+
+impl NodeCache {
+    fn get(&self, kind: u8, a: &Addr, ttl: Duration) -> Option<Arc<Vec<u8>>> {
+        let m = self.map.lock().unwrap();
+        m.get(&(kind, *a)).filter(|(t, _)| t.elapsed() < ttl).map(|(_, v)| v.clone())
+    }
+
+    fn put(&self, kind: u8, a: &Addr, v: Vec<u8>) -> Arc<Vec<u8>> {
+        let v = Arc::new(v);
+        let mut m = self.map.lock().unwrap();
+        if m.len() >= NODE_CACHE_MAX {
+            m.clear();
+        }
+        m.insert((kind, *a), (Instant::now(), v.clone()));
+        v
+    }
+}
+
+/// Balance (kind 0) or code (kind 1) of `a`, cached; None if the node fails
+/// or is slower than RPC_CALL_TIMEOUT.
+async fn node_read(s: &AppState, kind: u8, a: Addr) -> Option<Arc<Vec<u8>>> {
+    let ttl = if kind == 0 { BALANCE_TTL } else { CODE_TTL };
+    if let Some(v) = s.node_cache.get(kind, &a, ttl) {
+        return Some(v);
+    }
+    let addr = hex0x(&a);
+    let r = if kind == 0 {
+        tokio::time::timeout(RPC_CALL_TIMEOUT, s.rpc.balance(&addr)).await
+    } else {
+        tokio::time::timeout(RPC_CALL_TIMEOUT, s.rpc.code(&addr)).await
+    };
+    match r {
+        Ok(Ok(v)) => Some(s.node_cache.put(kind, &a, v)),
+        _ => None,
+    }
+}
+
+/// Cache-Control for data about block `n`: long-lived once it is final.
+fn cache_header(s: &AppState, n: u64) -> HeaderValue {
+    let head = s.status.head.load(Ordering::Relaxed);
+    if head >= s.final_depth && n <= head - s.final_depth {
+        HeaderValue::from_static("public, max-age=86400, immutable")
+    } else {
+        HeaderValue::from_static("no-cache")
+    }
+}
+
+fn with_cache(h: HeaderValue, v: Value) -> Response {
+    let mut r = Json(v).into_response();
+    r.headers_mut().insert(header::CACHE_CONTROL, h);
+    r
+}
+
+/// Cursor "block:index" of the last item, for `before=`.
+fn cursor_of(t: &TxRec) -> String {
+    format!("{}:{}", t.block_number, t.index)
+}
+
+fn parse_cursor(c: &str) -> Option<(u64, u32)> {
+    let (n, i) = c.split_once(':')?;
+    Some((n.parse().ok()?, i.parse().ok()?))
 }
 
 #[derive(Clone)]
@@ -281,7 +357,10 @@ type ApiResult = Result<Json<Value>, ApiError>;
 pub struct ListQ {
     limit: Option<usize>,
     page: Option<usize>,
+    offset: Option<usize>,
     pattern: Option<String>,
+    /// Keyset cursor "block:index": return items strictly older than it.
+    before: Option<String>,
 }
 
 fn limit_or(q: &ListQ, def: usize, max: usize) -> usize {
@@ -300,6 +379,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/blocks", get(blocks_list))
         .route("/api/blocks/range/{start}/{end}", get(blocks_range))
         .route("/api/blocks/{id}", get(block_detail))
+        .route("/api/blocks/{id}/transactions", get(block_txs))
         .route("/api/transactions", get(txs_list))
         .route("/api/transactions/pending/list", get(|| async { Json(json!([])) }))
         .route("/api/transactions/address/{addr}", get(txs_by_address))
@@ -365,7 +445,11 @@ async fn blocks_range(State(s): State<AppState>, Path((start, end)): Path<(u64, 
     Ok(Json(Value::Array(s.store.blocks_range(start, end)?.iter().map(block_json).collect())))
 }
 
-async fn block_detail(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult {
+/// Most transactions inlined in a block page; the rest via
+/// /api/blocks/{id}/transactions.
+const BLOCK_TXS_INLINE: usize = 500;
+
+fn find_block(s: &AppState, id: &str) -> Result<BlockRec, ApiError> {
     let b = if id.starts_with("0x") {
         let h = parse_fixed::<32>(&id).ok_or(ApiError::BadRequest("Invalid block hash"))?;
         s.store.block_by_hash(&h)?
@@ -373,10 +457,31 @@ async fn block_detail(State(s): State<AppState>, Path(id): Path<String>) -> ApiR
         let n: u64 = id.parse().map_err(|_| ApiError::BadRequest("Invalid block number"))?;
         s.store.block(n)?
     };
-    let b = b.ok_or(ApiError::NotFound("Block not found"))?;
+    b.ok_or(ApiError::NotFound("Block not found"))
+}
+
+async fn block_detail(State(s): State<AppState>, Path(id): Path<String>) -> Result<Response, ApiError> {
+    let b = find_block(&s, &id)?;
     let mut v = block_json(&b);
-    v["transactions"] = Value::Array(s.store.block_txs(b.number)?.iter().map(tx_json).collect());
-    Ok(Json(v))
+    let txs = s.store.block_txs_page(b.number, 0, BLOCK_TXS_INLINE)?;
+    v["transactions"] = Value::Array(txs.iter().map(tx_json).collect());
+    v["transactions_truncated"] = Value::Bool((b.tx_count as usize) > BLOCK_TXS_INLINE);
+    Ok(with_cache(cache_header(&s, b.number), v))
+}
+
+async fn block_txs(State(s): State<AppState>, Path(id): Path<String>, Query(q): Query<ListQ>) -> Result<Response, ApiError> {
+    let b = find_block(&s, &id)?;
+    let limit = limit_or(&q, 100, 1000);
+    let offset = q.offset.unwrap_or(0);
+    let txs = s.store.block_txs_page(b.number, offset, limit)?;
+    let v = json!({
+        "block_number": b.number,
+        "total": b.tx_count,
+        "offset": offset,
+        "limit": limit,
+        "transactions": txs.iter().map(tx_json).collect::<Vec<_>>(),
+    });
+    Ok(with_cache(cache_header(&s, b.number), v))
 }
 
 async fn txs_list(State(s): State<AppState>, Query(q): Query<ListQ>) -> ApiResult {
@@ -387,10 +492,14 @@ async fn txs_list(State(s): State<AppState>, Query(q): Query<ListQ>) -> ApiResul
 async fn txs_by_address(State(s): State<AppState>, Path(addr): Path<String>, Query(q): Query<ListQ>) -> ApiResult {
     let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
     let l = limit_or(&q, 20, 100);
-    Ok(Json(Value::Array(s.store.addr_txs(&a, 0, l)?.iter().map(tx_json).collect())))
+    let before = match q.before.as_deref() {
+        Some(c) => Some(parse_cursor(c).ok_or(ApiError::BadRequest("Invalid cursor"))?),
+        None => None,
+    };
+    Ok(Json(Value::Array(s.store.addr_txs_before(&a, before, l)?.iter().map(tx_json).collect())))
 }
 
-async fn tx_detail(State(s): State<AppState>, Path(hash): Path<String>) -> ApiResult {
+async fn tx_detail(State(s): State<AppState>, Path(hash): Path<String>) -> Result<Response, ApiError> {
     let h = parse_fixed::<32>(&hash).ok_or(ApiError::BadRequest("Invalid transaction hash"))?;
     let t = s.store.tx_by_hash(&h)?.ok_or(ApiError::NotFound("Transaction not found"))?;
     let mut v = tx_json(&t);
@@ -411,11 +520,21 @@ async fn tx_detail(State(s): State<AppState>, Path(hash): Path<String>) -> ApiRe
         })
         .collect();
     v["logs"] = Value::Array(logs);
-    Ok(Json(v))
+    Ok(with_cache(cache_header(&s, t.block_number), v))
 }
 
-async fn addresses_list() -> ApiError {
-    ApiError::NotFound("Address ranking is not available; use /api/addresses/{address}")
+/// Addresses by transaction count, highest first.
+async fn addresses_list(State(s): State<AppState>, Query(q): Query<ListQ>) -> ApiResult {
+    let l = limit_or(&q, 20, 100);
+    let rows = s.store.top_addrs(q.offset.unwrap_or(0).min(100_000), l)?;
+    Ok(Json(Value::Array(
+        rows.iter()
+            .map(|(a, i)| {
+                json!({"address": hex0x(a), "transaction_count": i.tx_count, "first_seen": iso(i.first_ts),
+                       "last_seen": iso(i.last_ts), "is_contract": i.is_contract})
+            })
+            .collect(),
+    )))
 }
 
 async fn addresses_search(State(s): State<AppState>, Query(q): Query<ListQ>) -> ApiResult {
@@ -437,17 +556,22 @@ async fn address_detail(State(s): State<AppState>, Path(addr): Path<String>, Que
     let addr = hex0x(&a);
     let page = q.page.filter(|p| *p >= 1).unwrap_or(1);
     let limit = limit_or(&q, 25, 50);
-    // Node calls run concurrently with the store reads and are bounded, so a
-    // slow node degrades the balance/code fields instead of the whole page.
-    let rpc = s.rpc.clone();
-    let a1 = addr.clone();
-    let balance = tokio::spawn(async move { tokio::time::timeout(RPC_CALL_TIMEOUT, rpc.balance(&a1)).await });
-    let rpc = s.rpc.clone();
-    let a2 = addr.clone();
-    let code = tokio::spawn(async move { tokio::time::timeout(RPC_CALL_TIMEOUT, rpc.code(&a2)).await });
+    // Node calls run concurrently with the store reads, are cached briefly
+    // and bounded, so a slow node degrades the balance/code fields instead
+    // of the whole page.
+    let s2 = s.clone();
+    let balance = tokio::spawn(async move { node_read(&s2, 0, a).await });
+    let s2 = s.clone();
+    let code = tokio::spawn(async move { node_read(&s2, 1, a).await });
 
     let info = s.store.addr_info(&a)?;
-    let txs: Vec<Value> = s.store.addr_txs(&a, (page - 1) * limit, limit)?.iter().map(tx_json).collect();
+    // `before` (keyset) costs the same at any depth; `page` skips entries.
+    let txs = match q.before.as_deref() {
+        Some(c) => s.store.addr_txs_before(&a, Some(parse_cursor(c).ok_or(ApiError::BadRequest("Invalid cursor"))?), limit)?,
+        None => s.store.addr_txs(&a, (page - 1).saturating_mul(limit), limit)?,
+    };
+    let next_cursor = if txs.len() == limit { txs.last().map(cursor_of) } else { None };
+    let txs: Vec<Value> = txs.iter().map(tx_json).collect();
     let deploy = match info.and_then(|i| i.creator) {
         Some((n, i)) => s.store.tx(n, i)?.map(|t| {
             json!({"hash": hex0x(&t.hash), "block_number": t.block_number,
@@ -456,12 +580,12 @@ async fn address_detail(State(s): State<AppState>, Path(addr): Path<String>, Que
         None => None,
     };
     let balance = match balance.await {
-        Ok(Ok(Ok(b))) => Value::String(dec(&b)),
+        Ok(Some(b)) => Value::String(dec(&b)),
         _ => Value::Null,
     };
-    let code = match code.await {
-        Ok(Ok(Ok(c))) => c,
-        _ => Vec::new(),
+    let code: Arc<Vec<u8>> = match code.await {
+        Ok(Some(c)) => c,
+        _ => Arc::new(Vec::new()),
     };
     let i = info.unwrap_or_default();
     Ok(Json(json!({
@@ -478,6 +602,7 @@ async fn address_detail(State(s): State<AppState>, Path(addr): Path<String>, Que
         "total_transactions": i.tx_count,
         "page": page,
         "limit": limit,
+        "next_cursor": next_cursor,
     })))
 }
 
