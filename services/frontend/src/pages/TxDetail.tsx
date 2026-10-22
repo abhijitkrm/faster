@@ -30,7 +30,7 @@ const LogEntry = ({ log }) => {
   const topics = (parsed?.topics || log.topics || []);
   const data = parsed?.data ?? log.data;
   const eventSig = topics[0]?.toLowerCase() || '';
-  const eventName = EVENT_NAMES[eventSig];
+  const eventName = log.decoded?.name || EVENT_NAMES[eventSig];
 
   const topicLabel = (idx) => {
     if (idx === 0) return 'signature';
@@ -79,6 +79,15 @@ const LogEntry = ({ log }) => {
         </div>
       )}
 
+      {log.decoded && (
+        <div style={{ fontSize: 10, fontFamily: 'monospace', marginBottom: 6, color: 'var(--text-2)' }}>
+          <div style={{ color: 'var(--purple)', marginBottom: 2 }}>{log.decoded.signature}</div>
+          {log.decoded.params.map((p, i) => (
+            <div key={i}><span style={{ color: 'var(--text-3)', marginRight: 8 }}>{p.name || `arg${i}`}{p.indexed ? ' (indexed)' : ''}</span>
+              {typeof p.value === 'string' ? p.value : JSON.stringify(p.value)}</div>
+          ))}
+        </div>
+      )}
       {data && data !== '0x' && (
         <div style={{ fontSize: 10, color: 'var(--text-3)', wordBreak: 'break-all', marginBottom: 4 }}>
           <span style={{ color: 'var(--text-3)', marginRight: 8 }}>data</span>
@@ -236,6 +245,21 @@ export default function TxDetail() {
           </Row>
         )}
       </div>
+
+      {/* Decoded call (verified contracts) */}
+      {tx.decoded_input && (
+        <div className="panel" style={{ marginBottom: 18 }}>
+          <div className="panel-head"><span className="panel-title">Decoded Input</span>
+            <span style={{ fontSize: 11, color: 'var(--purple)', fontFamily: 'monospace' }}>{tx.decoded_input.signature}</span></div>
+          <table className="dt"><tbody>
+            {tx.decoded_input.params.map((p, i) => (
+              <tr key={i}><td style={{ color: 'var(--text-3)', width: 160 }}>{p.name || `arg${i}`}</td>
+                <td style={{ color: 'var(--text-3)', width: 120 }}>{p.type}</td>
+                <td style={{ fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all' }}>{typeof p.value === 'string' ? p.value : JSON.stringify(p.value)}</td></tr>
+            ))}
+          </tbody></table>
+        </div>
+      )}
 
       {/* Internal calls */}
       {tx.internal_transactions && tx.internal_transactions.length > 0 && (

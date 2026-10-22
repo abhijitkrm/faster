@@ -244,6 +244,8 @@ pub struct AppState {
     pub clob: Option<Arc<crate::clob::Clob>>,
     pub node_cache: Arc<NodeCache>,
     pub max_ws_clients: usize,
+    /// None when contract verification is disabled (VERIFIER_ENABLED=false).
+    pub verifier: Option<Arc<crate::verify::Verifier>>,
 }
 
 /// Short-lived cache of node reads (balance, code) so hot address pages do
@@ -382,7 +384,9 @@ pub fn router(state: AppState, limiter: Arc<crate::guard::Limiter>) -> Router {
         .route("/api/addresses", get(addresses_list))
         .route("/api/addresses/search/by-pattern", get(addresses_search))
         .route("/api/addresses/{addr}", get(address_detail))
-        .route("/api", get(crate::etherscan::handler))
+        .route("/api", get(crate::etherscan::handler).post(crate::etherscan::post_handler))
+        .route("/api/contracts/{addr}", get(contract_detail))
+        .route("/api/contracts/{addr}/verify", axum::routing::post(contract_verify))
         .route("/api/tokens", get(tokens_list))
         .route("/api/tokens/{addr}", get(token_detail))
         .route("/api/tokens/{addr}/transfers", get(token_transfers))
@@ -400,6 +404,8 @@ pub fn router(state: AppState, limiter: Arc<crate::guard::Limiter>) -> Router {
         // After routing, so metrics see the route template; the WebSocket
         // upgrade answers immediately, so the timeout does not cut sockets.
         .route_layer(middleware::from_fn_with_state(limiter, crate::guard::guard))
+        // Standard-JSON verification input can be large.
+        .layer(axum::extract::DefaultBodyLimit::max(25 << 20))
         .layer(tower_http::timeout::TimeoutLayer::with_status_code(StatusCode::GATEWAY_TIMEOUT, HTTP_TIMEOUT))
         .fallback(|| async { (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))) })
         .with_state(state)
@@ -505,16 +511,22 @@ async fn tx_detail(State(s): State<AppState>, Path(hash): Path<String>) -> Resul
     if let Some(b) = s.store.block(t.block_number)? {
         v["block_hash"] = Value::String(hex0x(&b.hash));
     }
+    let abi_of = |a: &Addr| s.verifier.as_ref().and_then(|v| v.abi(&s.store, a));
+    if let Some(abi) = t.to.as_ref().and_then(abi_of) {
+        v["decoded_input"] = json!(crate::verify::decode_input(&abi, &t.input));
+    }
     let logs: Vec<Value> = s
         .store
         .tx_logs(&t)?
         .iter()
         .map(|(i, l)| {
+            let decoded = abi_of(&l.address).and_then(|abi| crate::verify::decode_log(&abi, &l.topics, &l.data));
             json!({
                 "log_index": i,
                 "address": hex0x(&l.address),
                 "topics": l.topics.iter().map(|t| hex0x(t)).collect::<Vec<_>>(),
                 "data": hex0x(&l.data),
+                "decoded": decoded,
             })
         })
         .collect();
@@ -610,7 +622,85 @@ async fn address_detail(State(s): State<AppState>, Path(addr): Path<String>, Que
         "page": page,
         "limit": limit,
         "next_cursor": next_cursor,
+        "verified": s.store.contract(&a)?.map(|c| json!({"name": c.name, "match_type": c.match_type, "compiler": c.compiler})),
     })))
+}
+
+// ---- contract verification ----
+
+async fn contract_detail(State(s): State<AppState>, Path(addr): Path<String>) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    let c = s.store.contract(&a)?.ok_or(ApiError::NotFound("Contract is not verified"))?;
+    Ok(Json(json!({
+        "address": hex0x(&a),
+        "name": c.name,
+        "file": c.file,
+        "compiler": c.compiler,
+        "match_type": c.match_type,
+        "abi": serde_json::from_str::<Value>(&c.abi).unwrap_or(Value::Null),
+        "sources": c.sources,
+        "settings": c.settings,
+        "constructor_args": c.constructor_args,
+        "verified_at": iso(c.verified_at),
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct VerifyReq {
+    compiler_version: String,
+    contract_name: String,
+    /// Solidity standard-JSON input (object, or the same as a string).
+    standard_json: Value,
+    #[serde(default)]
+    constructor_args: String,
+}
+
+/// Runs a verification and stores the result; shared with the Etherscan API.
+pub async fn run_verification(
+    s: &AppState,
+    a: Addr,
+    compiler: &str,
+    contract: &str,
+    input: Value,
+    args: &str,
+) -> Result<crate::verify::ContractRecord, String> {
+    let v = s.verifier.clone().ok_or("contract verification is disabled")?;
+    let input = match input {
+        Value::String(t) => serde_json::from_str(&t).map_err(|_| "standard_json is not valid JSON".to_string())?,
+        other => other,
+    };
+    let code = match tokio::time::timeout(Duration::from_secs(10), s.rpc.code(&hex0x(&a))).await {
+        Ok(Ok(c)) => c,
+        _ => return Err("could not read the contract code from the node".into()),
+    };
+    // The deploying tx's input, when the contract was created by an EOA tx.
+    let creation = s
+        .store
+        .addr_info(&a)
+        .ok()
+        .flatten()
+        .and_then(|i| i.creator)
+        .and_then(|(n, i)| s.store.tx(n, i).ok().flatten())
+        .filter(|t| t.contract_address == Some(a))
+        .map(|t| t.input);
+    let rec = v.verify(&code, creation.as_deref(), compiler, contract, input, args).await.map_err(|e| e.to_string())?;
+    s.store.put_contract(&a, &rec).map_err(|e| {
+        tracing::error!(err = %e, "store contract");
+        "internal error".to_string()
+    })?;
+    v.forget(&a);
+    tracing::info!(address = %hex0x(&a), name = %rec.name, match_type = %rec.match_type, "contract verified");
+    Ok(rec)
+}
+
+async fn contract_verify(State(s): State<AppState>, Path(addr): Path<String>, Json(req): Json<VerifyReq>) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    match run_verification(&s, a, &req.compiler_version, &req.contract_name, req.standard_json, &req.constructor_args)
+        .await
+    {
+        Ok(r) => Ok(Json(json!({"status": "verified", "name": r.name, "match_type": r.match_type}))),
+        Err(e) => Ok(Json(json!({"status": "failed", "error": e}))),
+    }
 }
 
 // ---- internal transactions ----

@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 
 import { API } from '../config';
 import AddressTokens from '../components/AddressTokens';
+import ContractPanel from '../components/ContractPanel';
 
 const fmtNum   = (n) => (n == null ? '—' : Number(n).toLocaleString());
 const fmtEth   = (wei) => { try { return (Number(BigInt(wei)) / 1e18).toFixed(6); } catch { return '0.000000'; } };
@@ -380,6 +381,8 @@ export default function Address() {
           )
         }
       </div>
+
+      {isContract && <div style={{ marginTop: 18 }}><ContractPanel address={address} verified={!!data.verified} /></div>}
 
       <AddressTokens address={address} />
     </div>

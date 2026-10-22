@@ -110,6 +110,7 @@ async fn clob_clickhouse_integration() {
         final_depth: 16,
         node_cache: Default::default(),
         max_ws_clients: 10,
+        verifier: None,
         clob: Some(Arc::new(Clob::new(&url, &db, &user, &pass).unwrap())),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

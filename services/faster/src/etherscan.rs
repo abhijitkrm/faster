@@ -66,6 +66,9 @@ pub async fn handler(State(s): State<AppState>, Query(q): Query<HashMap<String, 
         ("account", "txlistinternal") => txlistinternal(&s, &q),
         ("block", "getblocknumberbytime") => blockbytime(&s, &q),
         ("transaction", "gettxreceiptstatus") => receipt_status(&s, &q),
+        ("contract", "getabi") => getabi(&s, &q),
+        ("contract", "getsourcecode") => getsourcecode(&s, &q),
+        ("contract", "checkverifystatus") => checkverifystatus(&s, &q),
         ("proxy", "eth_blockNumber") => {
             let h = s.store.head().ok().flatten().map_or(0, |h| h.number);
             return Json(json!({"jsonrpc": "2.0", "id": 1, "result": format!("0x{h:x}")}));
@@ -247,6 +250,117 @@ fn txlistinternal(s: &AppState, q: &HashMap<String, String>) -> Result<Json<Valu
         out.push(item(*n, ts, h, c));
     }
     Ok(ok(Value::Array(out)))
+}
+
+/// POST /api (form or query): `module=contract&action=verifysourcecode`
+/// as sent by forge / hardhat-verify. Verification runs in the background;
+/// poll `checkverifystatus` with the returned guid.
+pub async fn post_handler(
+    State(s): State<AppState>,
+    Query(mut q): Query<HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> Json<Value> {
+    if let Ok(form) = serde_urlencoded::from_bytes::<Vec<(String, String)>>(&body) {
+        q.extend(form);
+    }
+    if (qs(&q, "module"), qs(&q, "action")) != (Some("contract"), Some("verifysourcecode")) {
+        return handler(State(s), Query(q)).await;
+    }
+    let Some(v) = s.verifier.clone() else { return notok("Contract verification is disabled") };
+    let Some(addr) = qs(&q, "contractaddress").and_then(parse_fixed::<20>) else {
+        return notok("Invalid contractaddress");
+    };
+    if qs(&q, "codeformat").unwrap_or("solidity-standard-json-input") != "solidity-standard-json-input" {
+        return notok("Only codeformat=solidity-standard-json-input is supported");
+    }
+    let (Some(src), Some(name), Some(compiler)) =
+        (qs(&q, "sourceCode"), qs(&q, "contractname"), qs(&q, "compilerversion"))
+    else {
+        return notok("Missing sourceCode, contractname or compilerversion");
+    };
+    let input = Value::String(src.to_string());
+    let (name, compiler) = (name.to_string(), compiler.to_string());
+    // "constructorArguements" is Etherscan's spelling.
+    let args = qs(&q, "constructorArguements").or(qs(&q, "constructorArguments")).unwrap_or("").to_string();
+    let guid = format!("{:016x}{:016x}", rand_u64(), rand_u64());
+    v.jobs.lock().unwrap().insert(guid.clone(), "Pending in queue".into());
+    let (s2, g2) = (s.clone(), guid.clone());
+    tokio::spawn(async move {
+        let r = crate::api::run_verification(&s2, addr, &compiler, &name, input, &args).await;
+        let status = match r {
+            Ok(_) => "Pass - Verified".to_string(),
+            Err(e) => format!("Fail - Unable to verify. {e}"),
+        };
+        if let Some(v) = &s2.verifier {
+            let mut j = v.jobs.lock().unwrap();
+            if j.len() > 10_000 {
+                j.clear();
+            }
+            j.insert(g2, status);
+        }
+    });
+    Json(json!({"status": "1", "message": "OK", "result": guid}))
+}
+
+fn rand_u64() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+    h.finish()
+}
+
+fn checkverifystatus(s: &AppState, q: &HashMap<String, String>) -> Result<Json<Value>, String> {
+    let guid = qs(q, "guid").ok_or("Error! Missing guid")?;
+    let st = s.verifier.as_ref().and_then(|v| v.jobs.lock().unwrap().get(guid).cloned());
+    match st {
+        Some(st) if st.starts_with("Pass") || st.starts_with("Pending") => Ok(Json(
+            json!({"status": if st.starts_with("Pass") { "1" } else { "0" }, "message": if st.starts_with("Pass") { "OK" } else { "NOTOK" }, "result": st}),
+        )),
+        Some(st) => Ok(Json(json!({"status": "0", "message": "NOTOK", "result": st}))),
+        None => Err("Unknown UID".into()),
+    }
+}
+
+fn getabi(s: &AppState, q: &HashMap<String, String>) -> Result<Json<Value>, String> {
+    let a = addr_param(q, "address")?;
+    match s.store.contract(&a).map_err(internal)? {
+        Some(c) => Ok(Json(json!({"status": "1", "message": "OK", "result": c.abi}))),
+        None => Err("Contract source code not verified".into()),
+    }
+}
+
+fn getsourcecode(s: &AppState, q: &HashMap<String, String>) -> Result<Json<Value>, String> {
+    let a = addr_param(q, "address")?;
+    let r = match s.store.contract(&a).map_err(internal)? {
+        Some(c) => {
+            let input = json!({"language": "Solidity",
+                "sources": c.sources.iter().map(|(k, v)| (k.clone(), json!({"content": v}))).collect::<serde_json::Map<_, _>>(),
+                "settings": c.settings});
+            let opt = &c.settings["optimizer"];
+            json!({
+                // Etherscan wraps standard-JSON input in double braces.
+                "SourceCode": format!("{{{}}}", input),
+                "ABI": c.abi,
+                "ContractName": c.name,
+                "CompilerVersion": c.compiler,
+                "OptimizationUsed": if opt["enabled"].as_bool() == Some(true) { "1" } else { "0" },
+                "Runs": opt["runs"].as_u64().unwrap_or(200).to_string(),
+                "ConstructorArguments": c.constructor_args,
+                "EVMVersion": c.settings["evmVersion"].as_str().unwrap_or("Default"),
+                "Library": "",
+                "LicenseType": "",
+                "Proxy": "0",
+                "Implementation": "",
+                "SwarmSource": "",
+            })
+        }
+        None => {
+            json!({"SourceCode": "", "ABI": "Contract source code not verified", "ContractName": "", "CompilerVersion": "",
+                       "OptimizationUsed": "", "Runs": "", "ConstructorArguments": "", "EVMVersion": "", "Library": "",
+                       "LicenseType": "", "Proxy": "0", "Implementation": "", "SwarmSource": ""})
+        }
+    };
+    Ok(Json(json!({"status": "1", "message": "OK", "result": [r]})))
 }
 
 fn blockbytime(s: &AppState, q: &HashMap<String, String>) -> Result<Json<Value>, String> {

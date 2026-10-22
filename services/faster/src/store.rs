@@ -24,6 +24,7 @@
 //! | token_meta | token 20                         | TokenMeta (not reorg-tracked) |
 //! | token_name | lowercase name/symbol ‖ 0 ‖ token | (empty), for search     |
 //! | itx        | number u64 ‖ tx u32 ‖ trace u32  | InternalTx (TRACE_CALLS) |
+//! | contract   | address 20                       | verified source (JSON; not reorg-tracked) |
 //! | itx_addr   | addr 20 ‖ ^number ‖ ^tx ‖ ^trace | (empty)                  |
 //!
 //! Token balances are derived from transfers (ERC-20 amount, ERC-721 count
@@ -74,9 +75,11 @@ const CF_TOKEN: &str = "token";
 const CF_TOKEN_RANK: &str = "token_rank";
 const CF_TOKEN_META: &str = "token_meta";
 const CF_TOKEN_NAME: &str = "token_name";
+const CF_CONTRACT: &str = "contract";
 const CF_ITX: &str = "itx";
 const CF_ITX_ADDR: &str = "itx_addr";
-const CFS: [&str; 22] = [
+const CFS: [&str; 23] = [
+    CF_CONTRACT,
     CF_ITX,
     CF_ITX_ADDR,
     CF_META,
@@ -1195,6 +1198,24 @@ impl Store {
             None => a.to_vec(),
         };
         self.addr_txs_from(a, &start, 0, limit)
+    }
+
+    // ---- verified contracts ----
+
+    pub fn contract(&self, a: &Addr) -> Result<Option<crate::verify::ContractRecord>> {
+        match self.db.get_pinned_cf(self.cf(CF_CONTRACT), a)? {
+            Some(v) => Ok(Some(serde_json::from_slice(&v)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn put_contract(&self, a: &Addr, r: &crate::verify::ContractRecord) -> Result<()> {
+        let mut wo = WriteOptions::default();
+        wo.set_sync(true);
+        let mut wb = WriteBatch::default();
+        wb.put_cf(self.cf(CF_CONTRACT), a, serde_json::to_vec(r)?);
+        self.db.write_opt(wb, &wo)?;
+        Ok(())
     }
 
     // ---- tokens ----

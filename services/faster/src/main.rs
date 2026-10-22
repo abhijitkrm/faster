@@ -15,6 +15,7 @@ mod rpc;
 mod store;
 mod tokens;
 mod types;
+mod verify;
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -110,6 +111,11 @@ async fn main() -> Result<()> {
         final_depth: reorg_depth,
         node_cache: Default::default(),
         max_ws_clients,
+        verifier: if env("VERIFIER_ENABLED", true)? {
+            Some(verify::Verifier::new(env("SOLC_DIR", data_dir.join("solc"))?))
+        } else {
+            None
+        },
         clob: if ch_url.is_empty() {
             None
         } else {

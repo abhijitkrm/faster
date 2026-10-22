@@ -29,6 +29,8 @@ faster directly, set `TRUST_PROXY_HEADERS=false`.
 | `REORG_DEPTH` | 256 | deepest reorg handled; deeper stops the process (resync needed) |
 | `FETCH_BATCH` / `FETCH_CONCURRENCY` | 10 / 16 | blocks per RPC batch / batches in flight; lower them for rate-limited providers |
 | `CACHE_MB` | 512 | RocksDB block cache |
+| `VERIFIER_ENABLED` | true | contract verification (downloads official solc releases on first use; needs egress to binaries.soliditylang.org) |
+| `SOLC_DIR` | `$DATA_DIR/solc` | compiler cache |
 | `TRACE_CALLS` | false | index internal transactions (needs `debug_traceBlockByNumber`; archive node for history) |
 | `RATE_LIMIT_RPS` / `RATE_LIMIT_BURST` | 100 / 200 | per client IP; 0 disables |
 | `CORS_ORIGINS` | `*` | comma-separated allow-list for browsers on other origins |
@@ -108,3 +110,7 @@ node, behind the nginx upstream; they converge to the same data. ClickHouse
 - Terminate TLS in front of nginx (or add a TLS server block).
 - Keep the admin port (9100) off public networks; it can create backups.
 - Set `CORS_ORIGINS` if other sites call the API from browsers.
+- Contract verification runs solc releases downloaded from
+  binaries.soliditylang.org (sha256-checked, at most two compilations at a
+  time, 120 s timeout, 20 MB input limit, empty environment). Set
+  `VERIFIER_ENABLED=false` to turn it off.

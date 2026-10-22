@@ -116,6 +116,36 @@ STATICCALL, CALLCODE, CREATE, CREATE2, SELFDESTRUCT), `from_address`,
 `to_address`, `value`, `gas`, `gas_used`, `error`; list items add
 `block_number`, `block_timestamp`, `transaction_hash`, `cursor`.
 
+## Contract verification and decoding
+
+Solidity contracts are verified from standard-JSON input with the exact
+compiler release. faster downloads the official solc binary for that release
+(binaries.soliditylang.org, checked against the published sha256), compiles,
+and compares with the chain:
+
+- runtime code: immutables masked, library placeholders taken from the chain;
+- creation code: when the contract was deployed by a transaction, that
+  transaction's input must match the compiled creation code too (so a
+  different constructor or initializer cannot verify); the remainder is
+  recorded as constructor arguments;
+- `full` match: identical including the metadata hash; `partial`: identical
+  code, different metadata (e.g. comments), or a contract created by another
+  contract (runtime code only).
+
+| Endpoint | |
+|---|---|
+| `POST /api/contracts/{address}/verify` | `{"compiler_version": "v0.8.24+commit.e11b9ed9", "contract_name": "src/Token.sol:Token", "standard_json": {...}}` → `{"status": "verified", "match_type": ...}` or `{"status": "failed", "error": ...}` |
+| `GET /api/contracts/{address}` | `name, file, compiler, match_type, abi, sources, settings, constructor_args, verified_at` |
+
+Once verified, `GET /api/transactions/{hash}` adds `decoded_input`
+(`name, signature, params[{name, type, value}]`) for calls to the contract and
+`decoded` on its logs (`params` also carry `indexed`); address details carry
+`verified: {name, match_type, compiler}`.
+
+Foundry: `forge verify-contract --verifier blockscout --verifier-url
+https://<host>/api <address> <path:Name>` (uses the Etherscan-style actions
+below). Hardhat: set the network's `apiURL` to `https://<host>/api`.
+
 ## Etherscan-compatible API
 
 `GET /api?module=...&action=...` with Etherscan's envelope
@@ -131,6 +161,9 @@ STATICCALL, CALLCODE, CREATE, CREATE2, SELFDESTRUCT), `from_address`,
 | `block` / `getblocknumberbytime` | `timestamp`, `closest` (before / after) |
 | `transaction` / `gettxreceiptstatus` | `txhash` |
 | `proxy` / `eth_blockNumber` | — |
+| `contract` / `verifysourcecode` (POST) | `contractaddress`, `sourceCode` (standard JSON), `codeformat=solidity-standard-json-input`, `contractname`, `compilerversion`, `constructorArguements` → guid |
+| `contract` / `checkverifystatus` | `guid` → `Pending in queue` / `Pass - Verified` / `Fail - ...` |
+| `contract` / `getabi`, `getsourcecode` | `address` |
 
 `page × offset` is capped at 10,000 as on Etherscan.
 
