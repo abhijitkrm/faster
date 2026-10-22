@@ -1,0 +1,51 @@
+# Rendered by the nginx image at start (envsubst of ${FASTER_UPSTREAM}).
+server {
+    listen 8080;
+    server_name _;
+    root /usr/share/nginx/html;
+    server_tokens off;
+
+    gzip on;
+    gzip_min_length 1024;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    add_header X-Frame-Options DENY always;
+
+    # Hashed build output never changes.
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        try_files $uri =404;
+    }
+
+    location = /config.js {
+        add_header Cache-Control "no-cache";
+    }
+
+    # API: X-Forwarded-For is overwritten (not appended) so clients cannot
+    # spoof the address faster rate-limits on.
+    location ~ ^/(api/|stats$|health$|ready$) {
+        proxy_pass http://${FASTER_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_read_timeout 30s;
+    }
+
+    location = /ws {
+        proxy_pass http://${FASTER_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_read_timeout 120s;
+    }
+
+    # SPA: unknown paths serve index.html.
+    location / {
+        add_header Cache-Control "no-cache";
+        try_files $uri /index.html;
+    }
+}

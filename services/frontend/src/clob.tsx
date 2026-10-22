@@ -4,7 +4,8 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 
-export const API = import.meta.env.VITE_API_URL || 'http://localhost:4000';
+export { API } from './config';
+import { API } from './config';
 
 export const shortHash = (h) => (h ? h.slice(0, 10) + '…' + h.slice(-6) : '');
 export const shortAddr = (a) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '—');

@@ -6,8 +6,8 @@ services:
       dockerfile: Dockerfile
     image: faster:faster
     container_name: faster-faster
-    ports:
-      - "4000:3000"
+    # Not published: the frontend nginx is the only public entry point and
+    # proxies /api, /stats and /ws here.
     environment:
       RPC_URL: ${RPC_URL}
       PORT: 3000
@@ -29,7 +29,8 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
       RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-100}
       RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-200}
-      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
+      # Safe only because nothing but the frontend nginx can reach this port.
+      TRUST_PROXY_HEADERS: "true"
     volumes:
       - faster-data:/data
     stop_grace_period: 30s
@@ -102,21 +103,21 @@ services:
     networks:
       - explorer-network
 
-  # Frontend Application
+  # UI + public entry point: nginx serves the app and proxies the API to faster.
   frontend:
     build:
       context: ./services/frontend
       dockerfile: Dockerfile
-      args:
-        VITE_API_URL: ${VITE_API_URL:-http://localhost:4000}
     image: faster:frontend
     container_name: faster-frontend
     ports:
-      - "4001:5173"
+      - "${HTTP_PORT:-4000}:8080"
+    environment:
+      FASTER_UPSTREAM: faster:3000
+      # Empty: the UI calls the API on its own origin (proxied above).
+      FASTER_API_URL: ${FASTER_API_URL:-}
     depends_on:
       - faster
-    environment:
-      NODE_ENV: ${NODE_ENV:-production}
     restart: unless-stopped
     networks:
       - explorer-network

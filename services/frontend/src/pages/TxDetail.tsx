@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:4000';
+import { API } from '../config';
 
 const fmtNum   = (n) => (n == null ? '—' : Number(n).toLocaleString());
 const fmtEth   = (wei) => { try { return (Number(BigInt(wei)) / 1e18).toFixed(6); } catch { return '0.000000'; } };

@@ -367,6 +367,7 @@ fn limit_or(q: &ListQ, def: usize, max: usize) -> usize {
 pub fn router(state: AppState, limiter: Arc<crate::guard::Limiter>) -> Router {
     Router::new()
         .route("/", get(root))
+        .route("/ws", get(root))
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/stats", get(stats))

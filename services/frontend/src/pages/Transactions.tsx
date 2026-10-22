@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import TransactionList from '../components/TransactionList';
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:4000';
+import { API } from '../config';
 
 export default function Transactions() {
   const [txs, setTxs] = useState([]);

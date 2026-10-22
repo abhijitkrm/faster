@@ -1,26 +1,16 @@
-FROM node:18-alpine AS build
-
+FROM node:20-alpine AS build
 WORKDIR /app
-
-COPY package*.json ./
-RUN npm install
-
+COPY package.json package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+COPY index.html vite.config.js tsconfig.json postcss.config.js tailwind.config.js ./
+COPY public ./public
 COPY src ./src
-COPY index.html vite.config.js tsconfig.json ./
+RUN npx tsc --noEmit -p . && npm run build
 
-ARG VITE_API_URL=http://localhost:3000
-ENV VITE_API_URL=$VITE_API_URL
-
-RUN npm run build
-
-FROM node:18-alpine
-
-WORKDIR /app
-
-RUN npm install -g serve
-
-COPY --from=build /app/dist ./dist
-
-EXPOSE 5173
-
-CMD ["serve", "-s", "dist", "-l", "5173"]
+FROM nginx:1.27-alpine
+ENV FASTER_UPSTREAM=faster:3000 FASTER_API_URL=
+COPY deploy/default.conf.template /etc/nginx/templates/default.conf.template
+COPY deploy/40-faster-config.sh /docker-entrypoint.d/40-faster-config.sh
+COPY --from=build /app/dist /usr/share/nginx/html
+EXPOSE 8080
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 CMD wget -qO- http://127.0.0.1:8080/ >/dev/null || exit 1

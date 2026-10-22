@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import ClobBlockSection from '../components/ClobBlockSection';
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:4000';
+import { API } from '../config';
 
 const fmtNum  = (n) => (n == null ? '—' : Number(n).toLocaleString());
 const fmtVal  = (wei) => { try { return (Number(BigInt(wei)) / 1e18).toFixed(4); } catch { return '0.0000'; } };
@@ -41,6 +41,18 @@ export default function BlockDetail() {
   const navigate   = useNavigate();
   const [block, setBlock] = useState(null);
   const [notFound, setNotFound] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  // Blocks inline at most 500 txs; fetch the rest a page at a time.
+  const loadMore = () => {
+    if (!block || loadingMore) return;
+    setLoadingMore(true);
+    fetch(`${API}/api/blocks/${block.number}/transactions?offset=${block.transactions.length}&limit=1000`)
+      .then(r => r.json())
+      .then(d => setBlock(b => ({ ...b, transactions: [...b.transactions, ...(d.transactions || [])] })))
+      .catch(() => {})
+      .finally(() => setLoadingMore(false));
+  };
 
   useEffect(() => {
     setBlock(null); setNotFound(false);
@@ -62,9 +74,7 @@ export default function BlockDetail() {
 
   if (!block) return <div className="empty">Loading block…</div>;
 
-  const gasUsedPct = block.gas_limit > 0
-    ? ((block.gas_used / block.gas_limit) * 100).toFixed(1)
-    : '0';
+  const gasUsedPct = block.gas_limit > 0 ? (block.gas_used / block.gas_limit) * 100 : 0;
 
   return (
     <div>
@@ -115,7 +125,7 @@ export default function BlockDetail() {
         <Row label="Gas Used">
           <span>{fmtNum(block.gas_used)}</span>
           <span style={{ color: 'var(--text-3)', marginLeft: 10, fontSize: 11 }}>
-            ({gasUsedPct}% of {fmtNum(block.gas_limit)})
+            ({gasUsedPct.toFixed(1)}% of {fmtNum(block.gas_limit)})
           </span>
           {/* Gas usage bar */}
           <div style={{ marginTop: 6, height: 4, width: 200, background: 'var(--surface-2)',
@@ -135,7 +145,7 @@ export default function BlockDetail() {
       {/* Transactions */}
       <div className="page-head">
         <span className="page-title">Transactions</span>
-        <span className="page-count">{(block.transactions || []).length} in this block</span>
+        <span className="page-count">{Number(block.transactions_count).toLocaleString()} in this block</span>
       </div>
       <div className="panel">
         {(!block.transactions || block.transactions.length === 0)
@@ -184,6 +194,14 @@ export default function BlockDetail() {
           )
         }
       </div>
+
+      {(block.transactions || []).length < block.transactions_count && (
+        <div style={{ textAlign: 'center', margin: '12px 0' }}>
+          <button onClick={loadMore} disabled={loadingMore} style={navBtnStyle}>
+            {loadingMore ? 'Loading…' : `Load more (${(block.transactions_count - block.transactions.length).toLocaleString()} remaining)`}
+          </button>
+        </div>
+      )}
 
       <ClobBlockSection height={block.number} />
     </div>

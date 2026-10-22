@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:4000';
+import { API } from '../config';
 
 // ── Type detection ────────────────────────────────────────────────────────────
 const RE_TX_OR_BLOCK_HASH = /^0x[0-9a-fA-F]{64}$/i;   // 32-byte hash (tx, block or CLOB order)

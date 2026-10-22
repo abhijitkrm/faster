@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:4000';
+import { API } from '../config';
 
 const fmtNum   = (n) => (n == null ? '—' : Number(n).toLocaleString());
 const fmtEth   = (wei) => { try { return (Number(BigInt(wei)) / 1e18).toFixed(6); } catch { return '0.000000'; } };
@@ -112,13 +112,28 @@ export default function Address() {
   const [data,   setData]   = useState(null);
   const [page,   setPage]   = useState(1);
   const [copied, setCopied] = useState(false);
+  // cursors[i] is the `before` cursor that loads page i + 1 (page 1 has
+  // none). Keyset paging costs the same at any depth, unlike ?page=.
+  const [cursors, setCursors] = useState([null]);
 
-  const load = useCallback((p) => {
-    fetch(`${API}/api/addresses/${address}?page=${p}&limit=25`)
-      .then(r => r.json()).then(d => { setData(d); setPage(p); }).catch(() => {});
+  const load = useCallback((p, cur) => {
+    const before = cur[p - 1];
+    const q = before ? `before=${before}` : 'page=1';
+    fetch(`${API}/api/addresses/${address}?${q}&limit=25`)
+      .then(r => r.json())
+      .then(d => {
+        setData(d);
+        setPage(p);
+        setCursors(c => {
+          const next = c.slice(0, p);
+          next[p] = d.next_cursor || null;
+          return next;
+        });
+      })
+      .catch(() => {});
   }, [address]);
 
-  useEffect(() => { load(1); }, [load]);
+  useEffect(() => { setCursors([null]); load(1, [null]); }, [load]);
 
   const copy = () => {
     navigator.clipboard.writeText(address).then(() => {
@@ -350,14 +365,14 @@ export default function Address() {
               {totalPages > 1 && (
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center',
                               gap: 8, padding: '14px 20px', borderTop: '1px solid var(--border)' }}>
-                  <button onClick={() => load(page - 1)} disabled={page <= 1}
+                  <button onClick={() => load(page - 1, cursors)} disabled={page <= 1}
                     style={pagerStyle(page <= 1)}>← Prev</button>
                   <span style={{ fontSize: 10, color: 'var(--text-3)', letterSpacing: '.1em',
                                  textTransform: 'uppercase' }}>
                     Page {page} / {totalPages}
                   </span>
-                  <button onClick={() => load(page + 1)} disabled={page >= totalPages}
-                    style={pagerStyle(page >= totalPages)}>Next →</button>
+                  <button onClick={() => load(page + 1, cursors)} disabled={!cursors[page]}
+                    style={pagerStyle(!cursors[page])}>Next →</button>
                 </div>
               )}
             </>

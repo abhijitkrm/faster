@@ -6,6 +6,7 @@ import Blocks from './pages/Blocks';
 import BlockDetail from './pages/BlockDetail';
 import TxDetail    from './pages/TxDetail';
 import Transactions from './pages/Transactions';
+import Accounts from './pages/Accounts';
 import Address from './pages/Address';
 import ClobOrder from './pages/ClobOrder';
 import ClobTrader from './pages/ClobTrader';
@@ -111,7 +112,7 @@ export default function App() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexShrink: 0 }}>
               <Link to="/" className="logo">
                 <span className="logo-hex">&#x2B21;</span>
-                EVM Explorer
+                Faster
               </Link>
               <span className="live-pill">
                 <span className="live-dot" style={{ background: wsOk ? 'var(--accent)' : 'var(--text-3)' }} />
@@ -123,6 +124,7 @@ export default function App() {
               <Link to="/"             className={'nav-link' + va('/')}>Home</Link>
               <Link to="/blocks"       className={'nav-link' + va('/blocks')}>Blocks</Link>
               <Link to="/transactions" className={'nav-link' + va('/transactions')}>Txns</Link>
+              <Link to="/accounts"     className={'nav-link' + va('/accounts')}>Accounts</Link>
               <button
                 onClick={toggleTheme}
                 title="Toggle light / dark"
@@ -180,6 +182,8 @@ export default function App() {
             <Route path="/clob/order/:hash"    element={<ClobOrder />} />
             <Route path="/clob/trader/:addr"   element={<ClobTrader />} />
             <Route path="/clob/pair/:id"       element={<ClobPair />} />
+            <Route path="/accounts"            element={<Accounts />} />
+            <Route path="*"                    element={<div className="empty" style={{ paddingTop: 60 }}>Page not found.</div>} />
           </Routes>
         </div>
       </main>
