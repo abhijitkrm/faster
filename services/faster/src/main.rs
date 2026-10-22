@@ -2,6 +2,9 @@
 //! store and serves the explorer API and live WebSocket feed from it.
 
 mod api;
+mod clob;
+#[cfg(test)]
+mod clob_it;
 #[cfg(test)]
 mod e2e_test;
 mod indexer;
@@ -69,7 +72,7 @@ async fn main() -> Result<()> {
     let cache_mb: usize = env("CACHE_MB", 512)?;
     let rpc_timeout = Duration::from_millis(env("RPC_TIMEOUT_MS", 15_000)?);
     let ready_max_lag: u64 = env("READY_MAX_LAG", 10)?;
-    let clob_url = env("CLOB_API_URL", String::new())?;
+    let ch_url = env("CLICKHOUSE_URL", String::new())?;
 
     std::fs::create_dir_all(&data_dir).with_context(|| format!("create {}", data_dir.display()))?;
     let store = store::Store::open(
@@ -88,13 +91,15 @@ async fn main() -> Result<()> {
         ready_max_lag,
         final_depth: reorg_depth,
         node_cache: Default::default(),
-        clob: if clob_url.is_empty() {
+        clob: if ch_url.is_empty() {
             None
         } else {
-            Some(api::ClobProxy {
-                base: clob_url,
-                http: reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?,
-            })
+            Some(Arc::new(clob::Clob::new(
+                &ch_url,
+                &env("CLICKHOUSE_DB", "clob".to_string())?,
+                &env("CLICKHOUSE_USER", "default".to_string())?,
+                &env("CLICKHOUSE_PASSWORD", String::new())?,
+            )?))
         },
     };
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;

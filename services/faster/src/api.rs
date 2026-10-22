@@ -240,7 +240,7 @@ pub struct AppState {
     pub ready_max_lag: u64,
     /// Blocks this far below the head can no longer change (REORG_DEPTH).
     pub final_depth: u64,
-    pub clob: Option<ClobProxy>,
+    pub clob: Option<Arc<crate::clob::Clob>>,
     pub node_cache: Arc<NodeCache>,
 }
 
@@ -317,17 +317,10 @@ fn parse_cursor(c: &str) -> Option<(u64, u32)> {
     Some((n.parse().ok()?, i.parse().ok()?))
 }
 
-#[derive(Clone)]
-pub struct ClobProxy {
-    pub base: String,
-    pub http: reqwest::Client,
-}
-
 pub enum ApiError {
     NotFound(&'static str),
     BadRequest(&'static str),
     Internal(anyhow::Error),
-    Unavailable(&'static str),
 }
 
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
@@ -341,7 +334,6 @@ impl IntoResponse for ApiError {
         let (code, msg) = match self {
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, m),
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
-            ApiError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
             ApiError::Internal(e) => {
                 tracing::error!(err = %e, "request failed");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -387,7 +379,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/addresses", get(addresses_list))
         .route("/api/addresses/search/by-pattern", get(addresses_search))
         .route("/api/addresses/{addr}", get(address_detail))
-        .route("/api/clob/{*rest}", get(clob_proxy))
+        .route("/api/clob/stats", get(crate::clob::stats))
+        .route("/api/clob/orders/{hash}", get(crate::clob::item_by_hash))
+        .route("/api/clob/traders/{addr}/{kind}", get(crate::clob::trader_list))
+        .route("/api/clob/pairs/{pair}/trades", get(crate::clob::pair_trades))
+        .route("/api/clob/blocks/{height}", get(crate::clob::block))
+        .route("/api/clob/{*rest}", get(crate::clob::unknown))
         .layer(middleware::from_fn(cors))
         .with_state(state)
 }
@@ -604,34 +601,6 @@ async fn address_detail(State(s): State<AppState>, Path(addr): Path<String>, Que
         "limit": limit,
         "next_cursor": next_cursor,
     })))
-}
-
-async fn clob_proxy(State(s): State<AppState>, req: Request) -> Response {
-    let Some(p) = &s.clob else {
-        return ApiError::Unavailable("CLOB archive not configured").into_response();
-    };
-    let pq = req.uri().path_and_query().map(|x| x.as_str()).unwrap_or("/");
-    let url = format!("{}{}", p.base.trim_end_matches('/'), pq);
-    match p.http.get(&url).send().await {
-        Ok(r) => {
-            let code = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            let ct = r.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(String::from);
-            match r.bytes().await {
-                Ok(body) => {
-                    let mut resp = (code, body).into_response();
-                    if let Some(ct) = ct.and_then(|c| HeaderValue::from_str(&c).ok()) {
-                        resp.headers_mut().insert(header::CONTENT_TYPE, ct);
-                    }
-                    resp
-                }
-                Err(e) => ApiError::Internal(e.into()).into_response(),
-            }
-        }
-        Err(e) => {
-            tracing::warn!(err = %e, "clob proxy");
-            (StatusCode::BAD_GATEWAY, Json(json!({"error": "CLOB archive unreachable"}))).into_response()
-        }
-    }
 }
 
 // ---- WebSocket ----

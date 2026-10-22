@@ -1,44 +1,5 @@
 services:
-  # PostgreSQL Database
-  postgresql:
-    image: postgres:15-alpine
-    container_name: faster-postgresql
-    environment:
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: ${DB_NAME}
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ./database/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - explorer-network
-
-  # Redis Cache & Message Queue
-  redis:
-    image: redis:7-alpine
-    container_name: faster-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - explorer-network
-
-  # Faster: RocksDB hot store + chain indexer + explorer REST/WebSocket API in one process.
-  # Replaces fasterindexer + api-go for the explorer; /api/clob/* is proxied to api-go.
+  # Faster: RocksDB hot store + chain indexer + explorer REST/WebSocket API + CLOB API in one process.
   faster:
     build:
       context: ./services/faster
@@ -57,7 +18,10 @@ services:
       FETCH_BATCH: ${FETCH_BATCH:-10}
       FETCH_CONCURRENCY: ${FETCH_CONCURRENCY:-16}
       CACHE_MB: ${CACHE_MB:-512}
-      CLOB_API_URL: http://api:3000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DB: clob
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clob}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clob}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - faster-data:/data
@@ -131,38 +95,6 @@ services:
     networks:
       - explorer-network
 
-  # api-go: CLOB archive API (ClickHouse), reached through faster
-  api:
-    build:
-      context: ./services/api-go
-      dockerfile: Dockerfile
-    image: faster:api
-    container_name: faster-api
-    # Internal only: serves /api/clob/* to faster until the CLOB API is ported.
-    environment:
-      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@postgresql:5432/${DB_NAME}
-      REDIS_URL: redis://redis:6379
-      RPC_URL: ${RPC_URL}
-      PORT: 3000
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      CLICKHOUSE_ADDR: ${API_CLICKHOUSE_ADDR:-clickhouse:9000}
-      CLICKHOUSE_DB: clob
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clob}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clob}
-    depends_on:
-      postgresql:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    restart: unless-stopped
-    networks:
-      - explorer-network
-
   # Frontend Application
   frontend:
     build:
@@ -184,10 +116,6 @@ services:
 
 volumes:
   faster-data:
-    driver: local
-  postgres-data:
-    driver: local
-  redis-data:
     driver: local
   clickhouse-data:
     driver: local
