@@ -1,19 +1,13 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useWS } from '../context/WSContext';
+import { fmtEth, blockTimeMs } from '../format';
 
 const short = (h) => (h ? h.slice(0, 6) + '…' + h.slice(-4) : '—');
 const fmtInt = (n) => (n == null ? '—' : Number(n).toLocaleString('en-US'));
-const fmtEth = (wei) => {
-  try {
-    const v = BigInt(wei);
-    if (v === 0n) return '0';
-    return (Number(v) / 1e18).toLocaleString('en-US', { maximumFractionDigits: 4 }) + ' ETH';
-  } catch { return '—'; }
-};
-const ago = (tsSec, now) => {
-  if (!tsSec) return '—';
-  const s = Math.max(0, now / 1000 - Number(tsSec));
+const ago = (b, now) => {
+  if (!b || !b.timestamp) return '—';
+  const s = Math.max(0, (now - blockTimeMs(b)) / 1000);
   if (s < 60) return s.toFixed(s < 10 ? 1 : 0) + ' s';
   if (s < 3600) return Math.floor(s / 60) + ' min';
   return Math.floor(s / 3600) + ' h';
@@ -94,7 +88,7 @@ export default function Home() {
             : <div className="hero-num" style={{ color: 'var(--text-3)' }}>—</div>}
           {head && (
             <div className="hero-meta">
-              <span>sealed <b>{ago(head.timestamp, now)}</b> ago</span>
+              <span>arrived <b>{ago(head, now)}</b> ago</span>
               {indexMs != null && <span>indexed <span className="fast">{indexMs < 1 ? '< 1 ms' : `+${indexMs} ms`}</span> after arrival</span>}
               <span>{fmtInt(head.transactions_count)} txs{head.gas_limit > 0 ? ` · ${gasPct(head).toFixed(0)}% gas` : ''}</span>
             </div>
@@ -122,7 +116,7 @@ export default function Home() {
           {blocks.slice(0, 12).map((b, i) => (
             <Link key={b.hash} to={`/blocks/${b.number}`} className={'tape-tile' + (i === 0 ? ' newest' : '')}>
               <span className="n">#{fmtInt(b.number)}</span>
-              <span className="s">{fmtInt(b.transactions_count)} txs · {ago(b.timestamp, now)}</span>
+              <span className="s">{fmtInt(b.transactions_count)} txs · {ago(b, now)}</span>
               <span className="bar"><span style={{ width: `${gasPct(b)}%` }} /></span>
             </Link>
           ))}
@@ -144,7 +138,7 @@ export default function Home() {
                   <td><Link to={`/blocks/${b.number}`} className="num-link">{fmtInt(b.number)}</Link></td>
                   <td className="hide-sm"><Link to={`/address/${b.miner}`} className="addr-link" style={{ color: 'var(--text-2)' }}>{short(b.miner)}</Link></td>
                   <td className="mono" style={{ textAlign: 'right' }}>{fmtInt(b.transactions_count)}</td>
-                  <td className="mono" style={{ textAlign: 'right', color: 'var(--text-2)' }}>{ago(b.timestamp, now)}</td>
+                  <td className="mono" style={{ textAlign: 'right', color: 'var(--text-2)' }}>{ago(b, now)}</td>
                 </tr>
               ))}
             </tbody>
@@ -169,7 +163,7 @@ export default function Home() {
                     <Link to={`/address/${t.from_address}`} style={{ color: 'inherit' }}>{short(t.from_address)}</Link> → {t.to_address ? <Link to={`/address/${t.to_address}`} style={{ color: 'inherit' }}>{short(t.to_address)}</Link> : 'new contract'}
                   </td>
                   <td className="hide-sm"><span className="chip">{method(t.method)}</span></td>
-                  <td className="mono" style={{ textAlign: 'right' }}>{fmtEth(t.value)}</td>
+                  <td className="mono" style={{ textAlign: 'right' }}>{fmtEth(t.value)} ETH</td>
                 </tr>
               ))}
             </tbody>
