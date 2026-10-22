@@ -1,0 +1,23 @@
+== redb: loading 500000 blocks / 5000000 txs
+  load 558.9s  = 8946 tx/s ingest  size 4.30 GB
+  tx by hash                 p50   5.625µs  p99 216.042µs  p99.9 300.500µs  1-thread    27441 ops/s
+  latest 20 blocks           p50   1.625µs  p99   1.750µs  p99.9   4.750µs  1-thread   599203 ops/s
+  addr page warm (25)        p50  29.208µs  p99 619.209µs  p99.9 879.750µs  1-thread    12832 ops/s
+  addr page hot (25)         p50   9.958µs  p99  10.458µs  p99.9  18.125µs  1-thread    99660 ops/s
+  addr page hot deep (25)    n/a (no ordered index in this engine)
+  range scan to=X 100k blk   p50 100.112ms  p99 107.424ms  p99.9 107.424ms  1-thread        5 ops/s
+  agg full history           p50 465.132ms  p99 482.709ms  p99.9 482.709ms  1-thread        1 ops/s
+  tx by hash                 8 threads     508227 ops/s
+  addr page warm (25)        8 threads     103425 ops/s
+== qmdb: loading 500000 blocks / 5000000 txs
+  load 15.9s  = 314487 tx/s ingest  size 3.09 GB
+  tx by hash                 p50   1.875µs  p99   5.375µs  p99.9   6.500µs  1-thread   509467 ops/s
+  latest 20 blocks           n/a (no ordered index in this engine)
+  addr page warm (25)        n/a (no ordered index in this engine)
+  addr page hot (25)         n/a (no ordered index in this engine)
+  addr page hot deep (25)    n/a (no ordered index in this engine)
+  range scan to=X 100k blk   n/a (no ordered index in this engine)
+  agg full history           n/a (no ordered index in this engine)
+  tx by hash                 8 threads     594636 ops/s
+  addr page warm (25)        n/a
+DONE

@@ -1,0 +1,61 @@
+== duckdb: loading 500000 blocks / 5000000 txs
+  load 36.5s  = 137031 tx/s ingest  size 1.27 GB
+  tx by hash                 p50 188.292µs  p99 756.667µs  p99.9    2.08ms  1-thread     4488 ops/s
+  latest 20 blocks           p50  3.4915ms  p99 82.881916ms  p99.9 136.997833ms  1-thread      111 ops/s
+== sqlite: loading 500000 blocks / 5000000 txs
+== duckdb: (stopped; rerun with -ops 10000 at end)
+  load 212.2s  = 23559 tx/s ingest  size 2.17 GB
+  tx by hash                 p50   5.625µs  p99  10.333µs  p99.9  21.208µs  1-thread   169877 ops/s
+  latest 20 blocks           p50   8.583µs  p99   12.25µs  p99.9  57.292µs  1-thread   111947 ops/s
+  addr page warm (25)        p50  44.375µs  p99  64.709µs  p99.9 111.917µs  1-thread    22085 ops/s
+  addr page hot (25)         p50  19.167µs  p99   24.75µs  p99.9  71.042µs  1-thread    50727 ops/s
+  addr page hot deep (25)    p50  20.417µs  p99  26.458µs  p99.9      74µs  1-thread    47505 ops/s
+  range scan to=X 100k blk   p50 87.703125ms  p99 92.265458ms  p99.9 92.265458ms  1-thread       11 ops/s
+  agg full history           p50 2.844217875s  p99 3.053003959s  p99.9 3.053003959s  1-thread        0 ops/s
+  tx by hash                 8 threads      75153 ops/s
+  addr page warm (25)        8 threads      15354 ops/s
+== lmdb: loading 500000 blocks / 5000000 txs
+  load 144.5s  = 34604 tx/s ingest  size 2.33 GB
+  tx by hash                 p50   4.792µs  p99   9.875µs  p99.9  21.334µs  1-thread   191501 ops/s
+  latest 20 blocks           p50   3.042µs  p99   6.625µs  p99.9  32.208µs  1-thread   290631 ops/s
+  addr page warm (25)        p50  36.375µs  p99  60.125µs  p99.9 109.083µs  1-thread    26664 ops/s
+  addr page hot (25)         p50  11.208µs  p99  16.708µs  p99.9  70.875µs  1-thread    84273 ops/s
+  addr page hot deep (25)    p50  12.542µs  p99  18.416µs  p99.9  64.667µs  1-thread    76669 ops/s
+  range scan to=X 100k blk   p50 114.623833ms  p99 116.940958ms  p99.9 116.940958ms  1-thread        9 ops/s
+  agg full history           p50 585.468292ms  p99 587.326041ms  p99.9 587.326041ms  1-thread        2 ops/s
+  tx by hash                 8 threads     234028 ops/s
+  addr page warm (25)        8 threads      89779 ops/s
+== postgres-vacuumed: loading 500000 blocks / 5000000 txs
+  load 47.8s  = 104628 tx/s ingest  size 3.81 GB
+  tx by hash                 p50  48.583µs  p99  78.334µs  p99.9 100.542µs  1-thread    20215 ops/s
+  latest 20 blocks           p50   57.25µs  p99  89.625µs  p99.9 123.208µs  1-thread    17290 ops/s
+  addr page warm (25)        p50 179.959µs  p99 232.375µs  p99.9  281.25µs  1-thread     5467 ops/s
+  addr page hot (25)         p50 455.875µs  p99 560.792µs  p99.9   620.5µs  1-thread     2152 ops/s
+  addr page hot deep (25)    p50  121.25µs  p99 190.083µs  p99.9     273µs  1-thread     7834 ops/s
+  range scan to=X 100k blk   p50 170.795042ms  p99 172.116292ms  p99.9 172.116292ms  1-thread        7 ops/s
+  agg full history           p50 241.096334ms  p99 243.738708ms  p99.9 243.738708ms  1-thread        4 ops/s
+  tx by hash                 8 threads      65624 ops/s
+  addr page warm (25)        8 threads      27576 ops/s
+== redis: loading 500000 blocks / 5000000 txs
+  load 39.0s  = 128214 tx/s ingest  size 2.72 GB
+  tx by hash                 p50  186.75µs  p99 287.875µs  p99.9 1.253417ms  1-thread     5075 ops/s
+  latest 20 blocks           p50  93.084µs  p99 149.083µs  p99.9 232.541µs  1-thread    10126 ops/s
+  addr page warm (25)        p50  213.25µs  p99 311.458µs  p99.9 446.542µs  1-thread     4527 ops/s
+  addr page hot (25)         p50  204.25µs  p99 302.459µs  p99.9 360.083µs  1-thread     4721 ops/s
+  addr page hot deep (25)    p50 204.084µs  p99 300.334µs  p99.9 361.541µs  1-thread     4728 ops/s
+  range scan to=X 100k blk   n/a (no ordered scan in this engine)
+  agg full history           n/a (no ordered scan in this engine)
+  tx by hash                 8 threads      21662 ops/s
+  addr page warm (25)        8 threads      16933 ops/s
+== tidb: loading 500000 blocks / 5000000 txs
+  load 716.8s  = 6975 tx/s ingest  size 1.54 GB
+  tx by hash                 p50 568.333µs  p99 770.584µs  p99.9 1.013166ms  1-thread     1732 ops/s
+  latest 20 blocks           p50 837.667µs  p99 948.375µs  p99.9   1.099ms  1-thread     1190 ops/s
+  addr page warm (25)        p50 2.038667ms  p99 6.943375ms  p99.9 11.056667ms  1-thread      432 ops/s
+  addr page hot (25)         p50 1.290125ms  p99 3.739291ms  p99.9 5.400375ms  1-thread      641 ops/s
+  addr page hot deep (25)    p50   1.562ms  p99 3.483917ms  p99.9 5.914959ms  1-thread      576 ops/s
+  range scan to=X 100k blk   p50 754.083µs  p99  1.0215ms  p99.9  1.0215ms  1-thread      122 ops/s
+  agg full history           p50 785.125µs  p99     982µs  p99.9     982µs  1-thread        8 ops/s
+  tx by hash                 8 threads       7454 ops/s
+  addr page warm (25)        8 threads        719 ops/s
+DONE
