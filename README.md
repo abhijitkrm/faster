@@ -66,14 +66,24 @@ VITE_API_URL=http://localhost:4000
 ```
 ├── services/
 │   ├── fasterindexer/      # Go — polls RPC, indexes blocks/txs/logs into Redis + PostgreSQL
-│   ├── api-go/             # Go — REST + WebSocket API
+│   ├── api-go/             # Go — REST + WebSocket API (+ /api/clob/* from ClickHouse)
+│   ├── clobarchiver/       # Go — node CLOB archive (clob_getBlockArchive) → ClickHouse
 │   └── frontend/           # React 18 + Vite UI
 ├── database/
-│   └── init-db.sql         # Schema (auto-applied on first start)
+│   ├── init-db.sql         # Schema (auto-applied on first start)
+│   └── clickhouse/         # CLOB archive schema (auto-applied by the clickhouse service)
 ├── docker-compose.yml
 ├── .env.example
 └── .env                    # Your local config (git-ignored)
 ```
+
+## CLOB History Archive
+
+Order, cancel/amend and fill history of the chain's CLOB is archived in ClickHouse:
+node (`CLOB_ARCHIVE=1`) → `services/clobarchiver` → ClickHouse → `api-go` `/api/clob/*` →
+UI pages `/clob/order/:hash`, `/clob/trader/:addr`, `/clob/pair/:id` and a CLOB section on
+block pages. Quick start: `docker compose up -d clickhouse clobarchiver` (set `NODE_RPC`).
+Design, env vars, endpoints and local runs: [docs/CLOB_ARCHIVE.md](docs/CLOB_ARCHIVE.md).
 
 ## Technology Stack
 
