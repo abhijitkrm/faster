@@ -4,7 +4,7 @@ Long-term, queryable history of every CLOB order, cancel/amend and fill, built
 for billions to trillions of rows.
 
 ```
-node (CLOB_ARCHIVE=1)          services/clobarchiver            ClickHouse (clob.*)          services/api-go        frontend
+node (CLOB_ARCHIVE=1)          services/clobarchiver            ClickHouse (clob.*)          services/faster         frontend
 per-block spool  ──JSON-RPC──▶  N fetchers, in-order batches ──▶ base tables + MV copies ──▶ /api/clob/*  ──────▶ /clob/... pages
 clob_archiveLatest              checkpoint after insert          ReplacingMergeTree           (503 if CH unset)     block page section
 clob_getBlockArchive            gaps, repair, retries, metrics                                                      order-hash search
@@ -88,7 +88,12 @@ flush the already-ordered batch and exit. Run one archiver per database.
 
 A `progress` log line every 10 s reports heights/s, rows/s, checkpoint, node latest and lag.
 
-## API (`services/api-go`, enabled by `CLICKHOUSE_ADDR` or `CLICKHOUSE_DSN`)
+## API
+
+Served by `services/faster` (`src/clob.rs`, ported from the former api-go with identical
+routes and JSON; verified response-for-response on the shared fixtures). Enabled by
+`CLICKHOUSE_URL` (HTTP interface, e.g. `http://clickhouse:8123`) with `CLICKHOUSE_DB`
+(default `clob`), `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`.
 
 Without ClickHouse configured every `/api/clob/*` endpoint answers `503 {"error": …}`.
 JSON conventions: heights, `pair_id`, `idx`, `seq` are numbers; every other chain integer
@@ -136,14 +141,16 @@ go run ./cmd/fakenode -addr 127.0.0.1:18545 -latest 400 -gaps 150,151,152,301 &
 NODE_RPC=http://127.0.0.1:18545 CLICKHOUSE_USER=clob CLICKHOUSE_PASSWORD=clob go run .
 
 # API with the CLOB endpoints
-cd ../api-go
-CLICKHOUSE_ADDR=127.0.0.1:9000 CLICKHOUSE_USER=clob CLICKHOUSE_PASSWORD=clob go run .
+cd ../faster
+RPC_URL=http://127.0.0.1:8545 CLICKHOUSE_URL=http://127.0.0.1:8123 \
+CLICKHOUSE_USER=clob CLICKHOUSE_PASSWORD=clob cargo run --release
 curl localhost:3000/api/clob/stats
 
 # Everything in compose (archiver reads NODE_RPC, default host.docker.internal:8545)
-docker compose up -d clickhouse clobarchiver api
+docker compose up -d
 ```
 
-Tests: `go test ./...` in `services/clobarchiver` and `services/api-go`; add
-`CLOB_CH_TEST=1` (with ClickHouse up, `CLICKHOUSE_USER=clob CLICKHOUSE_PASSWORD=clob` by
-default) to run the integration tests, which create and drop their own databases.
+Tests: `go test ./...` in `services/clobarchiver` and `cargo test` in `services/faster`;
+add `CLOB_CH_TEST=1` (with ClickHouse up; `CLICKHOUSE_URL`, `CLICKHOUSE_USER`,
+`CLICKHOUSE_PASSWORD`) to run the integration tests, which create and drop their own
+databases.

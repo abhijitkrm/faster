@@ -1,227 +1,72 @@
-# Faster — Real-Time EVM Block Explorer
+# Faster — real-time EVM block explorer
 
-A high-performance, real-time EVM block explorer built on Docker using **Go** and React. Designed for high-throughput chains with sub-second block times — streams blocks and transactions live to the browser via WebSocket with no page refresh required.
+Faster indexes any EVM chain over JSON-RPC and serves a live explorer UI. The
+explorer path is one Rust process (`services/faster`) with an embedded RocksDB
+store: the indexer, the REST API and the WebSocket feed read and write the same
+in-process store, so a page is answered without a network hop to a database.
 
-> Works with any EVM-compatible chain (Ethereum, L2s, custom EVM L1s). Tested at 400ms block times with 50+ transactions per block.
+![Faster block explorer](screenshot.png)
 
-![Faster EVM Block Explorer](screenshot.png)
+| | |
+|---|---|
+| Ingest | ~250K tx/s sustained into the store (synthetic node, 8-core laptop); on a real node the node's RPC is usually the limit |
+| Lookups | tx by hash 0.04 ms server time; address page (25 txs) 0.25 ms; ~90K req/s per instance |
+| Live | blocks, txs and stats pushed over WebSocket as each block is committed |
+| Correctness | atomic per-commit writes, crash-safe restart, reorg rollback (parent-hash + head checks, undo journal) |
 
-## Features
+Measurements and method: [docs/STORE.md](docs/STORE.md). Why this storage
+design: [docs/STORAGE_BENCHMARK.md](docs/STORAGE_BENCHMARK.md) (13 engines
+compared).
 
-- **Real-time streaming** — blocks and transactions pushed to the UI as they land on chain
-- **Parallel block ingestion in Go** — `indexer` uses goroutines and an RPS rate limiter to fetch blocks + receipts from any EVM RPC
-- **Full data pipeline** — `indexer` → Redis Streams → PostgreSQL → `api` → WebSocket → frontend
-- **Go-based API gateway** — `api` serves REST and uses goroutines for low-latency WebSocket broadcasting
-- **Address activity tracking** — transaction counts and history per address
-- **Instantaneous TPS** — calculated from latest block tx count ÷ recent avg block time
-- **Terminal dark UI** — built with React + Vite, zero external UI dependencies
-- **Resumable indexing** — `indexer` saves checkpoint to Redis, picks up where it left off on restart
-- **Health endpoints** on every service
+## Services
 
-## Prerequisites
+| Service | What it does |
+|---|---|
+| `services/faster` (Rust) | Chain indexer + RocksDB hot store + explorer API (`/api/*`, `/stats`, WebSocket `/ws`) + CLOB history API (`/api/clob/*`, reads ClickHouse). Metrics and backups on an internal admin port. |
+| `services/frontend` (React + TypeScript) | Explorer UI, served by nginx, which is also the public entry point and proxies the API. |
+| `services/clobarchiver` (Go) | Optional: loads an evm-node's CLOB order/fill archive into ClickHouse ([docs/CLOB_ARCHIVE.md](docs/CLOB_ARCHIVE.md)). |
+| ClickHouse | Optional: CLOB history (analytics tier). |
 
-- [Docker](https://docs.docker.com/get-docker/) 20+
-- [Docker Compose](https://docs.docker.com/compose/install/) v2+
-- An EVM-compatible RPC endpoint (HTTP JSON-RPC)
+## Quick start
 
-## Quick Start
-
-```bash
-# 1. Clone the repo
-git clone https://github.com/your-username/faster-explorer.git
-cd faster-explorer
-
-# 2. Configure your chain
-cp .env.example .env
-# Edit .env — set RPC_URL to your chain's HTTP RPC endpoint
-
-# 3. Start everything
-docker compose up -d
-
-# 4. Open the explorer
-open http://localhost:4001
-```
-
-## Configuration
-
-Copy `.env.example` to `.env` and set the following:
-
-```env
-# Your chain's HTTP JSON-RPC endpoint (required)
-RPC_URL=http://your-rpc-node:8545/
-
-# Database
-DB_USER=explorer
-DB_PASSWORD=change_me_in_production
-DB_NAME=explorer
-
-# API base URL (used by the frontend)
-VITE_API_URL=http://localhost:4000
-```
-
-> **Note:** `eth_getBlockReceipts` must be supported by your RPC node for receipt data (gas used, status, logs). Most modern EVM nodes support it. If not, receipts will be `null` but blocks and transactions will still index.
-
-## Project Structure
-
-```
-├── services/
-│   ├── fasterindexer/      # Go — polls RPC, indexes blocks/txs/logs into Redis + PostgreSQL
-│   ├── api-go/             # Go — REST + WebSocket API (+ /api/clob/* from ClickHouse)
-│   ├── clobarchiver/       # Go — node CLOB archive (clob_getBlockArchive) → ClickHouse
-│   └── frontend/           # React 18 + Vite UI
-├── database/
-│   ├── init-db.sql         # Schema (auto-applied on first start)
-│   └── clickhouse/         # CLOB archive schema (auto-applied by the clickhouse service)
-├── docker-compose.yml
-├── .env.example
-└── .env                    # Your local config (git-ignored)
-```
-
-## CLOB History Archive
-
-Order, cancel/amend and fill history of the chain's CLOB is archived in ClickHouse:
-node (`CLOB_ARCHIVE=1`) → `services/clobarchiver` → ClickHouse → `api-go` `/api/clob/*` →
-UI pages `/clob/order/:hash`, `/clob/trader/:addr`, `/clob/pair/:id` and a CLOB section on
-block pages. Quick start: `docker compose up -d clickhouse clobarchiver` (set `NODE_RPC`).
-Design, env vars, endpoints and local runs: [docs/CLOB_ARCHIVE.md](docs/CLOB_ARCHIVE.md).
-
-## Technology Stack
-
-| Component | Technology |
-|-----------|-----------|
-| Indexer | Go (`indexer`), raw JSON-RPC, Redis Streams, PostgreSQL |
-| Message Queue | Redis Streams |
-| Database | PostgreSQL 15 |
-| API | Go (`api`) + Gorilla WebSocket |
-| Frontend | React 18 + Vite |
-| Container | Docker + Docker Compose |
-
-## API Reference
-
-### REST
-
-```
-GET  /api/blocks                      # Latest blocks
-GET  /api/blocks/:number              # Block by number
-GET  /api/transactions                # Latest transactions
-GET  /api/transactions/:hash          # Transaction by hash
-GET  /api/addresses/:address          # Address activity
-GET  /stats                           # Chain stats (TPS, block time, totals)
-GET  /health                          # Health check
-```
-
-### WebSocket
-
-Connect to `ws://localhost:4000` — the server pushes events as they are indexed:
-
-```javascript
-const ws = new WebSocket('ws://localhost:3000');
-
-ws.onmessage = ({ data }) => {
-  const msg = JSON.parse(data);
-  // msg.type === 'block'  → msg.data = block object
-  // msg.type === 'tx'     → msg.data = transaction object
-  // msg.type === 'stats'  → msg.data = { tps, avg_block_time, ... }
-};
-```
-
-## Services & Ports
-
-| Service | Port | Purpose |
-|---------|------|---------|
-| Frontend | 4001 | Web UI |
-| API (`api`) | 4000 | REST + WebSocket |
-| Faster Indexer | 3102 | Health only |
-| PostgreSQL | 5432 | Database |
-| Redis | 6379 | Streams + cache |
-
-## Common Commands
+Requirements: Docker with Compose v2 and an EVM JSON-RPC endpoint
+(`eth_getBlockReceipts` is used when the node has it).
 
 ```bash
-# View logs for a specific service
-docker compose logs -f indexer
-
-# Restart a service after editing its source
-docker compose up -d --build indexer
-
-# Open a database shell
-docker exec -it faster-postgresql psql -U explorer -d explorer
-
-# Check Redis stream lengths
-docker exec -it faster-redis redis-cli XLEN blocks:stream
-docker exec -it faster-redis redis-cli XLEN transactions:stream
-
-# Reset everything (deletes all indexed data)
-docker compose down -v && docker compose up -d
+cp .env.example .env        # set RPC_URL
+docker compose up -d --build
+open http://localhost:4000  # UI; the API is on the same origin (/api, /stats, /ws)
 ```
 
-## How It Works
+Indexing starts at `START_BLOCK` (default 0) and follows the chain head.
+`GET /ready` turns 200 once the store is within `READY_MAX_LAG` blocks of the
+node.
 
-```
-Chain RPC
-   │
-   ▼
-indexer  ──── eth_getBlockByNumber ────┐
-               └─── eth_getBlockReceipts     ─┤
-                                             ▼
-                                       Redis Streams
-                                       (blocks:stream,
-                                        transactions:stream)
-                                             │
-                                             ▼
-                                        PostgreSQL
-                                             │
-                                             ▼
-                                           api
-                                          /      \
-                                    REST ─        ─ WebSocket ──→ Browser
-```
+Without the CLOB archive, remove `clickhouse` and `clobarchiver` from the
+compose file; `/api/clob/*` then answers 503 and the UI hides nothing else.
 
-`fasterindexer` persists its last processed block number in Redis (`fasterindexer:lastBlock`), so it automatically resumes from where it stopped on restart — no blocks are missed.
-
-## Troubleshooting
-
-**No blocks appearing**
-- Verify your RPC endpoint is reachable: `curl -X POST http://your-rpc:8545/ -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' -H 'Content-Type: application/json'`
-- Check `indexer` logs: `docker compose logs -f indexer`
-
-**Transactions not indexing**
-- Check `indexer` logs for RPC rate-limit errors
-- Verify `transactions:stream` is growing: `docker exec faster-redis redis-cli XLEN transactions:stream`
-
-**Services won't start**
-```bash
-docker compose logs        # check all logs
-docker --version           # requires 20+
-docker compose version     # requires v2+
-```
-
-**Reset the indexer checkpoint** (re-index from a specific block)
-```bash
-docker exec faster-redis redis-cli SET fasterindexer:lastBlock 1234567
-docker compose restart indexer
-```
-
-## Database Backup & Restore
+## Development
 
 ```bash
-# Backup
-docker exec faster-postgresql pg_dump -U explorer explorer > backup.sql
+# backend
+cd services/faster
+cargo test                                   # unit + fake-node reorg/crash e2e tests
+RPC_URL=http://localhost:8545 cargo run --release
 
-# Restore
-docker exec -i faster-postgresql psql -U explorer explorer < backup.sql
+# synthetic chain for benchmarks: 2,000 blocks x 500 txs
+cargo run --release --bin fakenode -- 18546 2000 500
+
+# frontend (dev server proxies nothing; point it at a running faster)
+cd services/frontend && npm ci
+VITE_API_URL=http://localhost:3000 npm run dev
 ```
 
-## Security Notes
+ClickHouse integration test: `CLOB_CH_TEST=1 CLICKHOUSE_URL=http://127.0.0.1:8123 cargo test`.
 
-⚠️ The default configuration is for local development only.
+## Documentation
 
-For production:
-- Set a strong `DB_PASSWORD` in `.env`
-- Place the API behind a reverse proxy (nginx/Caddy) with TLS
-- Restrict Redis and PostgreSQL ports to internal networks only
-- Add authentication to the API if exposing publicly
-
-## License
-
-MIT
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — configuration, operations, backups, monitoring, scaling
+- [docs/API.md](docs/API.md) — REST and WebSocket reference
+- [docs/STORE.md](docs/STORE.md) — store layout, write path, reorg handling, measurements
+- [docs/CLOB_ARCHIVE.md](docs/CLOB_ARCHIVE.md) — CLOB archive pipeline
+- [CHANGELOG.md](CHANGELOG.md)
