@@ -127,6 +127,14 @@ func main() {
 	mux.HandleFunc("/api/transactions/", s.handleTransactions)
 	mux.HandleFunc("/api/addresses", s.handleAddresses)
 	mux.HandleFunc("/api/addresses/", s.handleAddresses)
+	clob, err := openClobStore()
+	if err != nil {
+		slog.Warn("clickhouse config; CLOB endpoints disabled", "err", err)
+	}
+	if clob == nil {
+		slog.Info("CLOB archive not configured; /api/clob/* answers 503")
+	}
+	mux.Handle("/api/clob/", &clobAPI{store: clob})
 	mux.HandleFunc("/", s.handleRoot) // WebSocket on /, 404 otherwise
 
 	listener, err := net.Listen("tcp", ":"+cfg.Port)
