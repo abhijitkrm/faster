@@ -25,7 +25,7 @@ export default function ClobOrder() {
   if (error) return (
     <div className="empty" style={{ paddingTop: 60 }}>
       {error}
-      <div style={{ marginTop: 10, fontFamily: 'monospace', fontSize: 11 }}>{hash}</div>
+      <div style={{ marginTop: 10, fontFamily: 'var(--mono)', fontSize: 12 }}>{hash}</div>
     </div>
   );
   if (!data) return <div className="empty">Loading order…</div>;
@@ -45,9 +45,9 @@ export default function ClobOrder() {
       <div className="panel" style={{ marginBottom: 18 }}>
         <div className="panel-head">
           <span className="panel-title">Overview</span>
-          <span style={{ fontSize: 10, color: 'var(--text-3)' }}>{timeAgo(it.block_time)}</span>
+          <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{timeAgo(it.block_time)}</span>
         </div>
-        <Row label="Hash"><span style={{ fontFamily: 'monospace', fontSize: 11 }}>{data.hash}</span></Row>
+        <Row label="Hash"><span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{data.hash}</span></Row>
         <Row label="Status">
           <StatusBadge status={it.status} />
           {it.reason && <span style={{ marginLeft: 10, color: 'var(--red)' }}>{it.reason}</span>}
@@ -90,7 +90,7 @@ export default function ClobOrder() {
             <tbody>
               {data.occurrences.map((x) => (
                 <tr key={`${x.kind}-${x.height}-${x.idx}`}>
-                  <td style={{ textTransform: 'uppercase', fontSize: 10, fontWeight: 700 }}>{x.kind}</td>
+                  <td style={{ textTransform: 'uppercase', fontSize: 12, fontWeight: 700 }}>{x.kind}</td>
                   <td><BlockLink height={x.height} /></td>
                   <td>{x.idx}</td>
                   <td style={{ textAlign: 'right' }}><StatusBadge status={x.status} /></td>

@@ -127,7 +127,21 @@ fn compute_stats(store: &Store) -> anyhow::Result<Value> {
         }
         _ => 0.0,
     };
+    // Median time from receiving a block to committing it, over recent
+    // blocks (catch-up batches wait longer in the queue and are skipped).
+    let mut lat: Vec<u64> = recent
+        .iter()
+        .take(50)
+        .filter(|b| b.seen_ms > 0 && b.indexed_ms >= b.seen_ms)
+        .map(|b| b.indexed_ms - b.seen_ms)
+        .collect();
+    lat.sort_unstable();
+    let index_ms = lat.get(lat.len() / 2).copied();
+    let tip = crate::metrics::get().tip.load(std::sync::atomic::Ordering::Relaxed);
+    let lag = tip.saturating_sub(head.map_or(0, |b| b.number));
     Ok(json!({
+        "index_latency_ms": index_ms,
+        "lag_blocks": lag,
         "total_blocks": c.blocks.to_string(),
         "block_height": head.map(|b| b.number.to_string()),
         "latest_block_timestamp": head.map(|b| b.timestamp.to_string()),
@@ -152,7 +166,10 @@ fn block_summary_json(b: &BlockRec) -> Value {
         "timestamp": b.timestamp,
         "miner": hex0x(&b.miner),
         "gas_used": b.gas_used,
+        "gas_limit": b.gas_limit,
         "transactions_count": b.tx_count,
+        "seen_ms": b.seen_ms,
+        "indexed_ms": b.indexed_ms,
     })
 }
 
@@ -174,6 +191,8 @@ fn block_json(b: &BlockRec) -> Value {
         "transactions_root": hex0x(&b.transactions_root),
         "receipts_root": hex0x(&b.receipts_root),
         "size": b.size,
+        "seen_ms": b.seen_ms,
+        "indexed_ms": b.indexed_ms,
     })
 }
 
@@ -185,6 +204,8 @@ fn tx_summary_json(t: &TxRec) -> Value {
         "to_address": t.to.map(|a| hex0x(&a)),
         "value": dec(&t.value),
         "status": t.status,
+        // 4-byte selector; "" for a plain transfer, "create" for deployments.
+        "method": if t.to.is_none() { "create".to_string() } else if t.input.len() >= 4 { hex0x(&t.input[..4]) } else { String::new() },
     })
 }
 
@@ -387,6 +408,7 @@ pub fn router(state: AppState, limiter: Arc<crate::guard::Limiter>) -> Router {
         .route("/api", get(crate::etherscan::handler).post(crate::etherscan::post_handler))
         .route("/api/contracts/{addr}", get(contract_detail))
         .route("/api/contracts/{addr}/verify", axum::routing::post(contract_verify))
+        .route("/api/config", get(ui_config))
         .route("/api/tokens", get(tokens_list))
         .route("/api/tokens/{addr}", get(token_detail))
         .route("/api/tokens/{addr}/transfers", get(token_transfers))
@@ -428,6 +450,11 @@ async fn ready(State(s): State<AppState>) -> Response {
     let ok = tip > 0 && lag <= s.ready_max_lag;
     let code = if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     (code, Json(json!({"ready": ok, "head": head, "tip": tip, "lag": lag}))).into_response()
+}
+
+/// Which optional features this deployment has, so the UI hides the rest.
+async fn ui_config(State(s): State<AppState>) -> Json<Value> {
+    Json(json!({"clob": s.clob.is_some(), "verifier": s.verifier.is_some()}))
 }
 
 async fn stats(State(s): State<AppState>) -> Json<Value> {
@@ -505,11 +532,14 @@ async fn txs_by_address(State(s): State<AppState>, Path(addr): Path<String>, Que
 }
 
 async fn tx_detail(State(s): State<AppState>, Path(hash): Path<String>) -> Result<Response, ApiError> {
+    let started = Instant::now();
     let h = parse_fixed::<32>(&hash).ok_or(ApiError::BadRequest("Invalid transaction hash"))?;
     let t = s.store.tx_by_hash(&h)?.ok_or(ApiError::NotFound("Transaction not found"))?;
     let mut v = tx_json(&t);
     if let Some(b) = s.store.block(t.block_number)? {
         v["block_hash"] = Value::String(hex0x(&b.hash));
+        v["block_seen_ms"] = json!(b.seen_ms);
+        v["block_indexed_ms"] = json!(b.indexed_ms);
     }
     let abi_of = |a: &Addr| s.verifier.as_ref().and_then(|v| v.abi(&s.store, a));
     if let Some(abi) = t.to.as_ref().and_then(abi_of) {
@@ -537,6 +567,7 @@ async fn tx_detail(State(s): State<AppState>, Path(hash): Path<String>) -> Resul
     let tts = s.store.tx_transfers(&t)?;
     v["token_transfers"] =
         Value::Array(tts.iter().map(|tr| transfer_json(&s, &mut ctx, t.block_number, tr)).collect::<Result<_, _>>()?);
+    v["served_us"] = json!(started.elapsed().as_micros() as u64);
     Ok(with_cache(cache_header(&s, t.block_number), v))
 }
 

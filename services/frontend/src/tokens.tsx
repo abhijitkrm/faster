@@ -18,27 +18,27 @@ export function fmtAmount(raw, decimals) {
 
 export const tokenLabel = (t) => t.symbol || t.name || shortAddr(t.address || t.token);
 
-export function TransfersTable({ items, showToken = true }) {
+export function TransfersTable({ items, showToken = true, compact = false }) {
   if (!items) return <div className="empty">Loading…</div>;
   if (!items.length) return <div className="empty">No token transfers</div>;
   return (
     <table className="dt">
       <thead><tr>
-        <th>Tx</th><th>Block</th><th>From</th><th>To</th>
+        {!compact && <th>Tx</th>}{!compact && <th>Block</th>}<th>From</th><th>To</th>
         {showToken && <th>Token</th>}
         <th style={{ textAlign: 'right' }}>Amount / ID</th>
       </tr></thead>
       <tbody>
         {items.map(t => (
           <tr key={t.cursor}>
-            <td style={{ fontSize: 11 }}>{t.transaction_hash ? <Link to={`/tx/${t.transaction_hash}`} className="hash-link">{t.transaction_hash.slice(0, 10)}…</Link> : '—'}</td>
-            <td><Link to={`/blocks/${t.block_number}`} className="num-link">#{Number(t.block_number).toLocaleString()}</Link></td>
+            {!compact && <td>{t.transaction_hash ? <Link to={`/tx/${t.transaction_hash}`} className="hash-link">{t.transaction_hash.slice(0, 10)}…</Link> : '—'}</td>}
+            {!compact && <td><Link to={`/blocks/${t.block_number}`} className="num-link">{Number(t.block_number).toLocaleString()}</Link></td>}
             <td><Link to={`/address/${t.from_address}`} className="addr-link"><span className="addr-cell">{shortAddr(t.from_address)}</span></Link></td>
             <td><Link to={`/address/${t.to_address}`} className="addr-link"><span className="addr-cell">{shortAddr(t.to_address)}</span></Link></td>
-            {showToken && <td><Link to={`/token/${t.token}`} className="addr-link">{t.token_symbol || shortAddr(t.token)}</Link> <span style={{ color: 'var(--text-3)', fontSize: 10 }}>{t.token_type}</span></td>}
+            {showToken && <td><Link to={`/token/${t.token}`} className="addr-link">{t.token_symbol || shortAddr(t.token)}</Link> <span style={{ color: 'var(--text-3)', fontSize: 12 }}>{t.token_type}</span></td>}
             <td style={{ textAlign: 'right' }}>
               {t.token_type === 'ERC-721' ? `#${t.token_id}` : fmtAmount(t.value, t.token_decimals)}
-              {t.token_type === 'ERC-1155' && <span style={{ color: 'var(--text-3)', fontSize: 10 }}> (id {t.token_id})</span>}
+              {t.token_type === 'ERC-1155' && <span style={{ color: 'var(--text-3)', fontSize: 12 }}> (id {t.token_id})</span>}
             </td>
           </tr>
         ))}

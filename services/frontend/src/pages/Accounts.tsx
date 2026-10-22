@@ -34,9 +34,9 @@ export default function Accounts() {
                 <tr key={r.address}>
                   <td style={{ color: 'var(--text-3)' }}>{offset + i + 1}</td>
                   <td><Link to={`/address/${r.address}`} className="addr-link"><span className="addr-cell">{r.address}</span></Link></td>
-                  <td style={{ color: 'var(--text-3)', fontSize: 11 }}>{r.is_contract ? 'Contract' : 'EOA'}</td>
+                  <td style={{ color: 'var(--text-3)', fontSize: 12 }}>{r.is_contract ? 'Contract' : 'EOA'}</td>
                   <td style={{ textAlign: 'right' }}>{Number(r.transaction_count).toLocaleString()}</td>
-                  <td style={{ textAlign: 'right', color: 'var(--text-3)', fontSize: 11 }}>{new Date(r.last_seen).toLocaleString()}</td>
+                  <td style={{ textAlign: 'right', color: 'var(--text-3)', fontSize: 12 }}>{new Date(r.last_seen).toLocaleString()}</td>
                 </tr>
               ))}
             </tbody>

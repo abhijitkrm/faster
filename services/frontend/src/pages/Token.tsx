@@ -36,11 +36,11 @@ export default function Token() {
         <span className="page-count">{t.type}</span>
       </div>
       <div className="panel" style={{ marginBottom: 18, padding: '12px 20px', display: 'flex', gap: 32, flexWrap: 'wrap', fontSize: 12 }}>
-        <div><div style={{ color: 'var(--text-3)', fontSize: 10 }}>CONTRACT</div><Link to={`/address/${t.address}`} className="addr-link" style={{ fontFamily: 'monospace' }}>{t.address}</Link></div>
-        <div><div style={{ color: 'var(--text-3)', fontSize: 10 }}>HOLDERS</div>{Number(t.holders).toLocaleString()}</div>
-        <div><div style={{ color: 'var(--text-3)', fontSize: 10 }}>TRANSFERS</div>{Number(t.transfers).toLocaleString()}</div>
-        <div><div style={{ color: 'var(--text-3)', fontSize: 10 }}>DECIMALS</div>{t.decimals ?? '—'}</div>
-        <div><div style={{ color: 'var(--text-3)', fontSize: 10 }}>FIRST BLOCK</div><Link to={`/blocks/${t.first_block}`} className="num-link">#{Number(t.first_block).toLocaleString()}</Link></div>
+        <div><div style={{ color: 'var(--text-3)', fontSize: 12 }}>CONTRACT</div><Link to={`/address/${t.address}`} className="addr-link" style={{ fontFamily: 'var(--mono)' }}>{t.address}</Link></div>
+        <div><div style={{ color: 'var(--text-3)', fontSize: 12 }}>HOLDERS</div>{Number(t.holders).toLocaleString()}</div>
+        <div><div style={{ color: 'var(--text-3)', fontSize: 12 }}>TRANSFERS</div>{Number(t.transfers).toLocaleString()}</div>
+        <div><div style={{ color: 'var(--text-3)', fontSize: 12 }}>DECIMALS</div>{t.decimals ?? '—'}</div>
+        <div><div style={{ color: 'var(--text-3)', fontSize: 12 }}>FIRST BLOCK</div><Link to={`/blocks/${t.first_block}`} className="num-link">#{Number(t.first_block).toLocaleString()}</Link></div>
       </div>
       <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
         <button className={'nav-link' + (tab === 'transfers' ? ' active' : '')} onClick={() => setTab('transfers')}>Transfers</button>

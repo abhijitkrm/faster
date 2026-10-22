@@ -29,25 +29,25 @@ export default function ContractPanel({ address, verified }) {
     } catch { setStatus({ error: 'Network error' }); }
   };
 
-  const box = { width: '100%', background: 'var(--surface-2)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 6, padding: 8, fontFamily: 'monospace', fontSize: 11 };
+  const box = { width: '100%', background: 'var(--surface-2)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 6, padding: 8, fontFamily: 'var(--mono)', fontSize: 12 };
 
   if (verified && c) {
     return (
       <div className="panel" style={{ marginBottom: 18 }}>
         <div className="panel-head">
           <span className="panel-title">Contract Source</span>
-          <span style={{ fontSize: 11, color: 'var(--green)' }}>✓ Verified ({c.match_type} match) · {c.name} · {c.compiler}</span>
+          <span style={{ fontSize: 12, color: 'var(--green)' }}>Verified ({c.match_type} match) · {c.name} · {c.compiler}</span>
           <button className="nav-link" style={{ marginLeft: 'auto' }} onClick={() => setOpen(!open)}>{open ? 'Hide' : 'Show'}</button>
         </div>
         {open && (
           <div style={{ padding: '10px 20px' }}>
             {Object.entries(c.sources || {}).map(([file, src]: [string, any]) => (
               <div key={file} style={{ marginBottom: 14 }}>
-                <div style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 4 }}>{file}</div>
+                <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 4 }}>{file}</div>
                 <pre style={{ ...box, maxHeight: 400, overflow: 'auto', whiteSpace: 'pre' }}>{src}</pre>
               </div>
             ))}
-            <div style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 4 }}>ABI</div>
+            <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 4 }}>ABI</div>
             <pre style={{ ...box, maxHeight: 240, overflow: 'auto' }}>{JSON.stringify(c.abi, null, 1)}</pre>
           </div>
         )}
@@ -69,7 +69,7 @@ export default function ContractPanel({ address, verified }) {
             onChange={e => setForm({ ...form, contract_name: e.target.value })} required />
           <textarea style={{ ...box, minHeight: 160 }} placeholder="Solidity standard JSON input" value={form.standard_json}
             onChange={e => setForm({ ...form, standard_json: e.target.value })} required />
-          <div style={{ fontSize: 11, color: 'var(--text-3)' }}>
+          <div style={{ fontSize: 12, color: 'var(--text-3)' }}>
             Or from Foundry: <code>forge verify-contract --verifier blockscout --verifier-url {API}/api &lt;address&gt; &lt;path:Name&gt;</code>
           </div>
           <button className="nav-link" type="submit" disabled={status?.busy}>{status?.busy ? 'Compiling…' : 'Verify'}</button>

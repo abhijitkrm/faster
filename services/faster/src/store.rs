@@ -49,7 +49,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::*;
 
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 
 pub const ROLE_FROM: u8 = 1;
 pub const ROLE_TO: u8 = 2;
@@ -1607,6 +1607,8 @@ mod tests {
                 size: 0,
                 tx_count: recs.len() as u32,
                 log_count: logs.len() as u32,
+                seen_ms: 0,
+                indexed_ms: 0,
             },
             txs: recs,
             logs,

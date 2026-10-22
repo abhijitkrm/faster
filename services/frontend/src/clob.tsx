@@ -56,7 +56,7 @@ export function StatusBadge({ status }) {
 
 export function SideBadge({ isBuy }) {
   return (
-    <span style={{ color: isBuy ? 'var(--green)' : 'var(--red)', fontWeight: 700, fontSize: 10, letterSpacing: '.08em' }}>
+    <span style={{ color: isBuy ? 'var(--green)' : 'var(--red)', fontWeight: 700, fontSize: 12, letterSpacing: '.08em' }}>
       {isBuy ? 'BUY' : 'SELL'}
     </span>
   );
@@ -66,7 +66,7 @@ export function TraderLink({ addr, full = false }) {
   if (!addr) return <span>—</span>;
   return (
     <Link to={`/clob/trader/${addr}`} className="addr-link" title={addr}
-      style={full ? { fontFamily: 'monospace', fontSize: 11 } : undefined}>
+      style={full ? { fontFamily: 'var(--mono)', fontSize: 12 } : undefined}>
       {full ? addr : <span className="addr-cell">{shortAddr(addr)}</span>}
     </Link>
   );
@@ -76,7 +76,7 @@ export function HashLink({ hash, full = false }) {
   if (!hash) return <span>—</span>;
   return (
     <Link to={`/clob/order/${hash}`} className="hash-link" title={hash}
-      style={full ? { fontFamily: 'monospace', fontSize: 11 } : undefined}>
+      style={full ? { fontFamily: 'var(--mono)', fontSize: 12 } : undefined}>
       {full ? hash : <span className="hash-cell">{shortHash(hash)}</span>}
     </Link>
   );
@@ -97,7 +97,7 @@ export const Row = ({ label, children }) => (
     fontSize: 12, alignItems: 'start',
   }}>
     <span style={{ color: 'var(--text-3)', fontWeight: 600, letterSpacing: '.06em',
-                   fontSize: 10, textTransform: 'uppercase', paddingTop: 2 }}>{label}</span>
+                   fontSize: 12, textTransform: 'uppercase', paddingTop: 2 }}>{label}</span>
     <span style={{ color: 'var(--text-2)', wordBreak: 'break-all' }}>{children}</span>
   </div>
 );
@@ -108,7 +108,7 @@ export const btnStyle = {
   borderRadius: 6,
   color: 'var(--text-2)',
   cursor: 'pointer',
-  fontSize: 10,
+  fontSize: 12,
   fontWeight: 700,
   letterSpacing: '.1em',
   padding: '4px 12px',
@@ -187,11 +187,11 @@ export function OrdersTable({ orders, showTrader = true, showBlock = true }) {
         <tbody>
           {orders.map((o) => (
             <tr key={`${o.height}-${o.idx}`}>
-              <td style={{ fontSize: 11 }}><HashLink hash={o.hash} /></td>
+              <td style={{ fontSize: 12 }}><HashLink hash={o.hash} /></td>
               {showBlock && <td><BlockLink height={o.height} /></td>}
               {showTrader && <td><TraderLink addr={o.trader} /></td>}
               <td><PairLink id={o.pair_id} /></td>
-              <td><SideBadge isBuy={o.is_buy} />{o.is_market && <span style={{ color: 'var(--text-3)', fontSize: 10, marginLeft: 6 }}>MKT</span>}</td>
+              <td><SideBadge isBuy={o.is_buy} />{o.is_market && <span style={{ color: 'var(--text-3)', fontSize: 12, marginLeft: 6 }}>MKT</span>}</td>
               <td style={{ textAlign: 'right' }}>{fmtBig(o.price)}</td>
               <td style={{ textAlign: 'right' }}>{fmtBig(o.amount)}</td>
               <td style={{ textAlign: 'right', color: 'var(--text-2)' }}>{fmtBig(o.filled)}</td>
@@ -223,8 +223,8 @@ export function CancelsTable({ cancels, showTrader = true, showBlock = true }) {
         <tbody>
           {cancels.map((c) => (
             <tr key={`${c.height}-${c.idx}`}>
-              <td style={{ fontSize: 11 }}><HashLink hash={c.hash} /></td>
-              <td style={{ textTransform: 'uppercase', fontSize: 10, fontWeight: 700, color: 'var(--text-2)' }}>{c.kind}</td>
+              <td style={{ fontSize: 12 }}><HashLink hash={c.hash} /></td>
+              <td style={{ textTransform: 'uppercase', fontSize: 12, fontWeight: 700, color: 'var(--text-2)' }}>{c.kind}</td>
               {showBlock && <td><BlockLink height={c.height} /></td>}
               {showTrader && <td><TraderLink addr={c.trader} /></td>}
               <td><PairLink id={c.pair_id} /></td>
@@ -302,7 +302,7 @@ export function TraderFillsTable({ fills, showPair = true }) {
               <td><BlockLink height={f.height} /></td>
               <td style={{ color: 'var(--text-3)' }}>{f.seq}</td>
               {showPair && <td><PairLink id={f.pair_id} /></td>}
-              <td style={{ textTransform: 'uppercase', fontSize: 10, fontWeight: 700, color: f.role === 'maker' ? 'var(--blue)' : 'var(--purple)' }}>{f.role}</td>
+              <td style={{ textTransform: 'uppercase', fontSize: 12, fontWeight: 700, color: f.role === 'maker' ? 'var(--blue)' : 'var(--purple)' }}>{f.role}</td>
               <td><SideBadge isBuy={f.is_buy} /></td>
               <td><TraderLink addr={f.counterparty} /></td>
               <td style={{ textAlign: 'right' }}>{fmtBig(f.price)}</td>

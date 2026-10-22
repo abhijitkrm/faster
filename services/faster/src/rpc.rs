@@ -503,6 +503,8 @@ pub(crate) fn assemble(b: RpcBlock, rs: Vec<RpcReceipt>) -> Result<FullBlock, Rp
         size: b.size.as_deref().and_then(parse_u64).unwrap_or(0),
         tx_count: txs.len() as u32,
         log_count: logs.len() as u32,
+        seen_ms: 0,
+        indexed_ms: 0,
     };
     Ok(FullBlock { block, txs, logs, internals: Vec::new() })
 }

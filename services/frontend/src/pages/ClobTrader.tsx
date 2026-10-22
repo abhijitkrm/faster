@@ -40,7 +40,7 @@ export default function ClobTrader() {
         borderRadius: 10, padding: '12px 18px', flexWrap: 'wrap',
       }}>
         <span className="page-title">CLOB Trader</span>
-        <span style={{ fontFamily: 'monospace', fontSize: 12, color: 'var(--text-2)', wordBreak: 'break-all', flex: 1 }}>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-2)', wordBreak: 'break-all', flex: 1 }}>
           {addr.toLowerCase()}
         </span>
         <Link to={`/address/${addr}`} className="panel-link">Address page →</Link>

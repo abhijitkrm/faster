@@ -118,7 +118,14 @@ impl Indexer {
         let mut fetched = stream::iter(chunks)
             .map(|nums| {
                 let rpc = rpc.clone();
-                tokio::spawn(async move { retry("blocks", || rpc.blocks(&nums)).await })
+                tokio::spawn(async move {
+                    let mut bs = retry("blocks", || rpc.blocks(&nums)).await;
+                    let seen = crate::types::now_ms();
+                    for b in bs.iter_mut() {
+                        b.block.seen_ms = seen;
+                    }
+                    bs
+                })
             })
             .buffered(self.cfg.concurrency);
         // Commits run one at a time on their own future, overlapped with
@@ -164,9 +171,13 @@ impl Indexer {
         r
     }
 
-    async fn commit(&self, blocks: Vec<FullBlock>) -> Result<()> {
+    async fn commit(&self, mut blocks: Vec<FullBlock>) -> Result<()> {
         if blocks.is_empty() {
             return Ok(());
+        }
+        let now = crate::types::now_ms();
+        for b in blocks.iter_mut() {
+            b.block.indexed_ms = now;
         }
         let store = self.store.clone();
         let t = Instant::now();

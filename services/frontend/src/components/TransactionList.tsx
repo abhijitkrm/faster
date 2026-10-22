@@ -1,8 +1,8 @@
+import { fmtEth } from '../format';
 import { Link } from 'react-router-dom';
 
 const shortHash = (h) => h ? h.slice(0,10) + '\u2026' + h.slice(-6) : '';
 const shortAddr = (a) => a ? a.slice(0,6)  + '\u2026' + a.slice(-4)  : 'Contract';
-const fmtVal    = (v) => { try { return (Number(BigInt(v)) / 1e18).toFixed(4); } catch { return '0.0000'; } };
 
 export default function TransactionList({ transactions }) {
   if (!transactions || transactions.length === 0) return <div className="empty">No transactions</div>;
@@ -16,7 +16,7 @@ export default function TransactionList({ transactions }) {
       <tbody>
         {transactions.map(tx => (
           <tr key={tx.hash}>
-            <td style={{fontSize:11}}><Link to={`/tx/${tx.hash}`} className="hash-link"><span className="hash-cell">{shortHash(tx.hash)}</span></Link></td>
+            <td style={{fontSize: 12}}><Link to={`/tx/${tx.hash}`} className="hash-link"><span className="hash-cell">{shortHash(tx.hash)}</span></Link></td>
             <td><Link to={`/blocks/${tx.block_number}`} className="num-link">#{Number(tx.block_number).toLocaleString()}</Link></td>
             <td>
               <Link to={'/address/' + tx.from_address} className="addr-link">
@@ -28,7 +28,7 @@ export default function TransactionList({ transactions }) {
                 <span className="addr-cell">{shortAddr(tx.to_address)}</span>
               </Link>
             </td>
-            <td style={{textAlign:'right'}}>{fmtVal(tx.value)}</td>
+            <td style={{textAlign:'right'}}>{fmtEth(tx.value)}</td>
             <td style={{textAlign:'right'}}>
               {tx.status === 1   && <span className="badge badge-ok">OK</span>}
               {tx.status === 0   && <span className="badge badge-fail">Fail</span>}

@@ -16,6 +16,7 @@ export function WSProvider({ children }) {
   const [txs,    setTxs]    = useState([]);
   // hashes added in the last 2 s — used to trigger the CSS flash animation
   const [newHashes, setNewHashes] = useState(new Set());
+  const [features, setFeatures] = useState({ clob: false, verifier: false });
   const wsRef    = useRef(null);
   const queue    = useRef([]);
   const frame    = useRef(0);
@@ -25,6 +26,7 @@ export function WSProvider({ children }) {
   useEffect(() => {
     alive.current = true;
     connect();
+    fetch(`${API_URL}/api/config`).then(r => r.json()).then(setFeatures).catch(() => {});
     // Stats come over the socket; poll only while it is down.
     const pollId = setInterval(async () => {
       if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -76,7 +78,10 @@ export function WSProvider({ children }) {
     }
     if (newTxs.length) {
       // the server sends txs oldest first; newest ends up on top
-      setTxs((prev) => [...newTxs.reverse(), ...prev].slice(0, MAX_TXS));
+      setTxs((prev) => {
+        const seen = new Set();
+        return [...newTxs.reverse(), ...prev].filter(t => !seen.has(t.hash) && seen.add(t.hash)).slice(0, MAX_TXS);
+      });
     }
   }
 
@@ -98,7 +103,7 @@ export function WSProvider({ children }) {
   }
 
   return (
-    <WSCtx.Provider value={{ wsOk, stats, blocks, txs, newHashes }}>
+    <WSCtx.Provider value={{ wsOk, stats, blocks, txs, newHashes, features }}>
       {children}
     </WSCtx.Provider>
   );

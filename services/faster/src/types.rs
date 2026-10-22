@@ -25,6 +25,14 @@ pub struct BlockRec {
     pub size: u64,
     pub tx_count: u32,
     pub log_count: u32,
+    /// Unix ms when faster received the block from the node.
+    pub seen_ms: u64,
+    /// Unix ms when faster committed it (searchable from then on).
+    pub indexed_ms: u64,
+}
+
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

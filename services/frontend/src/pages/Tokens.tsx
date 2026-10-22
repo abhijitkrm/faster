@@ -37,7 +37,7 @@ export default function Tokens() {
                     <Link to={`/token/${t.address}`} className="addr-link">{t.name || shortAddr(t.address)}</Link>
                     {t.symbol && <span style={{ color: 'var(--text-3)', marginLeft: 6 }}>({t.symbol})</span>}
                   </td>
-                  <td style={{ color: 'var(--text-3)', fontSize: 11 }}>{t.type}</td>
+                  <td style={{ color: 'var(--text-3)', fontSize: 12 }}>{t.type}</td>
                   <td style={{ textAlign: 'right' }}>{Number(t.holders).toLocaleString()}</td>
                   <td style={{ textAlign: 'right' }}>{Number(t.transfers).toLocaleString()}</td>
                 </tr>

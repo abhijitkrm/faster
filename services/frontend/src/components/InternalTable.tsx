@@ -1,7 +1,7 @@
+import { fmtEth } from '../format';
 import { Link } from 'react-router-dom';
 import { shortAddr } from '../tokens';
 
-const fmtEth = (wei) => { try { return (Number(BigInt(wei)) / 1e18).toFixed(6); } catch { return '0'; } };
 
 // Internal calls (from the node's call tracer; TRACE_CALLS=true).
 export function InternalTable({ items, showTx = false }) {
@@ -18,9 +18,9 @@ export function InternalTable({ items, showTx = false }) {
       <tbody>
         {items.map(c => (
           <tr key={(c.cursor || '') + c.transaction_index + ':' + c.trace_index}>
-            {showTx && <td style={{ fontSize: 11 }}><Link to={`/tx/${c.transaction_hash}`} className="hash-link">{c.transaction_hash.slice(0, 10)}…</Link></td>}
+            {showTx && <td style={{ fontSize: 12 }}><Link to={`/tx/${c.transaction_hash}`} className="hash-link">{c.transaction_hash.slice(0, 10)}…</Link></td>}
             {showTx && <td><Link to={`/blocks/${c.block_number}`} className="num-link">#{Number(c.block_number).toLocaleString()}</Link></td>}
-            <td style={{ fontSize: 11, color: c.error ? 'var(--red)' : 'var(--text-2)' }}>
+            <td style={{ fontSize: 12, color: c.error ? 'var(--red)' : 'var(--text-2)' }}>
               {'↳'.repeat(Math.max(0, c.depth - 1))} {c.type}{c.error ? ` (${c.error})` : ''}
             </td>
             <td><Link to={`/address/${c.from_address}`} className="addr-link"><span className="addr-cell">{shortAddr(c.from_address)}</span></Link></td>

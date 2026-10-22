@@ -33,7 +33,7 @@ export default function AddressTokens({ address }) {
                 {held.map(t => (
                   <tr key={t.address + (t.token_id ?? '')}>
                     <td><Link to={`/token/${t.address}`} className="addr-link">{t.name || shortAddr(t.address)}</Link>{t.symbol && <span style={{ color: 'var(--text-3)' }}> ({t.symbol})</span>}</td>
-                    <td style={{ color: 'var(--text-3)', fontSize: 11 }}>{t.type}{t.token_id != null && ` id ${t.token_id}`}</td>
+                    <td style={{ color: 'var(--text-3)', fontSize: 12 }}>{t.type}{t.token_id != null && ` id ${t.token_id}`}</td>
                     <td style={{ textAlign: 'right' }}>{t.type === 'ERC-20' ? fmtAmount(t.value, t.decimals) : t.value}</td>
                   </tr>
                 ))}

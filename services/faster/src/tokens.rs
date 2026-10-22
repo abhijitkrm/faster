@@ -194,6 +194,8 @@ mod tests {
                 size: 0,
                 tx_count: 1,
                 log_count: logs.len() as u32,
+                seen_ms: 0,
+                indexed_ms: 0,
             },
             txs: vec![],
             logs,
