@@ -85,6 +85,6 @@ jobs:
       - run: docker compose build
       - name: smoke test (faster image starts and answers /health)
         run: |
-          docker run -d --name f -e RPC_URL=http://127.0.0.1:1 faster:faster
-          for i in $(seq 1 30); do docker exec f curl -fs http://localhost:3000/health && exit 0; sleep 1; done
-          docker logs f; exit 1
+          docker run -d --name faster-smoke -e RPC_URL=http://127.0.0.1:1 faster:faster
+          for i in $(seq 1 30); do docker exec faster-smoke curl -fs http://localhost:3000/health && exit 0; sleep 1; done
+          docker logs faster-smoke; exit 1
