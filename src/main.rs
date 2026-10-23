@@ -1,23 +1,17 @@
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use faster_sync::api::{self, AppState, Guard, GuardConfig};
+use faster_sync::api;
 use faster_sync::chunk::WriteOpts;
 use faster_sync::ingest::{Ingest, IngestConfig};
 use faster_sync::metrics::Metrics;
-use faster_sync::query::Limits;
 use faster_sync::rpc::{Rpc, RpcConfig};
 use faster_sync::store::Store;
 
 fn env<T: std::str::FromStr>(k: &str, d: T) -> T {
     std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
-}
-
-fn env_list(k: &str) -> Vec<String> {
-    std::env::var(k).unwrap_or_default().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
 }
 
 #[tokio::main]
@@ -97,46 +91,16 @@ async fn serve(
     metrics: Arc<Metrics>,
     ingest: Option<tokio::task::JoinHandle<Result<()>>>,
 ) -> Result<()> {
-    let state = Arc::new(AppState {
-        store: store.clone(),
-        metrics: metrics.clone(),
-        limits: Limits {
-            max_rows: env("QUERY_MAX_ROWS", 200_000),
-            max_time: Duration::from_millis(env("QUERY_MAX_MS", 5_000)),
-            parallelism: env("QUERY_PARALLELISM", std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8)),
-            max_selection_values: env("QUERY_MAX_VALUES", 10_000),
-        },
-        ready_max_lag: env("READY_MAX_LAG", 10),
-        query_slots: tokio::sync::Semaphore::new(env("QUERY_CONCURRENCY", 32)),
-    });
-    let guard = Guard::new(
-        GuardConfig {
-            rate: env("RATE_LIMIT_RPS", 0.0),
-            burst: env("RATE_LIMIT_BURST", 50.0),
-            trust_proxy: env("TRUST_PROXY", false),
-            cors_origins: env_list("CORS_ORIGINS"),
-            api_keys: env_list("API_KEYS"),
-        },
-        metrics.clone(),
-    );
-    tokio::spawn(guard.clone().sweep());
-    let app = api::router(state.clone(), guard);
-    let addr: SocketAddr = std::env::var("LISTEN").unwrap_or_else(|_| "0.0.0.0:3100".into()).parse()?;
-    let admin: SocketAddr = std::env::var("ADMIN_LISTEN").unwrap_or_else(|_| "127.0.0.1:9101".into()).parse()?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    let admin_l = tokio::net::TcpListener::bind(admin).await?;
-    tracing::info!(%addr, %admin, "listening");
-    tokio::spawn(async move { axum::serve(admin_l, api::admin_router(state)).await });
-    let server =
-        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        });
+    api::spawn_from_env(store, metrics).await?;
+    let stop = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
     match ingest {
         Some(ingest) => tokio::select! {
             r = ingest => { r??; }
-            r = server => { r?; }
+            _ = stop => {}
         },
-        None => server.await?,
+        None => stop.await,
     }
     Ok(())
 }

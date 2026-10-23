@@ -66,6 +66,11 @@ back to per-transaction receipts); `TRACES=true` also needs
 Without `RPC_URL` the binary serves an existing data directory read-only
 (replicas, benchmarks).
 
+**Running reth?** [`reth/`](reth) builds `faster-sync-reth`: a reth node with
+faster-sync inside it as an execution extension. Blocks and receipts go from
+reth's database straight into the store, with no JSON-RPC in between, and
+reorgs arrive as reth sees them.
+
 ## Clients
 
 - Rust: [`clients/rust`](clients/rust) (`faster-sync-client`): JSON or Arrow
