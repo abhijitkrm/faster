@@ -301,12 +301,11 @@ pub fn cluster_col(t: Table) -> Option<&'static str> {
 const PAGE_ROWS: usize = 1024;
 
 fn props(t: Table, o: &WriteOpts) -> WriterProperties {
-    let mut b = WriterProperties::builder();
+    // Small pages everywhere: with the offset index, a point lookup decodes
+    // only the pages holding its rows.
+    let mut b = WriterProperties::builder().set_data_page_row_count_limit(PAGE_ROWS).set_write_batch_size(PAGE_ROWS);
     if let Some(c) = cluster_col(t) {
-        b = b
-            .set_column_statistics_enabled(parquet::schema::types::ColumnPath::from(c), EnabledStatistics::Page)
-            .set_data_page_row_count_limit(PAGE_ROWS)
-            .set_write_batch_size(PAGE_ROWS);
+        b = b.set_column_statistics_enabled(parquet::schema::types::ColumnPath::from(c), EnabledStatistics::Page);
     }
     b.set_compression(match o.codec {
         Codec::Lz4 => Compression::LZ4_RAW,
