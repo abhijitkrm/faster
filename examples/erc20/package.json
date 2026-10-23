@@ -1,0 +1,7 @@
+{
+  "name": "usdt-balances",
+  "private": true,
+  "type": "module",
+  "scripts": { "codegen": "faster-index codegen", "dev": "faster-index dev", "start": "faster-index start" },
+  "dependencies": { "faster-index": "file:../.." }
+}
