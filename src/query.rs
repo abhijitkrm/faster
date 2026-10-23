@@ -85,6 +85,8 @@ pub struct BlockSel {
 pub enum Join {
     /// Only the selected rows (and block headers if `include_all_blocks`).
     Nothing,
+    /// Selected rows and the header of each block with a result row.
+    Blocks,
     /// Selected rows, the transaction of each selected log/trace, and the
     /// header of each block with a result row.
     #[default]
@@ -733,7 +735,7 @@ fn run_source(plan: &Plan, src: &dyn Source, from: u64, to: u64) -> Result<Part>
     let traces = c.scan(Table::Traces, &plan.traces, false, tx_join())?;
 
     // 3. Transactions: own selections, plus the tx of every log/trace.
-    let txs = if join == Join::Nothing {
+    let txs = if matches!(join, Join::Nothing | Join::Blocks) {
         c.scan(Table::Transactions, &plan.txs, false, None)?
     } else {
         let (mut k, mut bs) = keys_of(&logs, Table::Logs);

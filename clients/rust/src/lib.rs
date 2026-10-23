@@ -85,6 +85,7 @@ pub struct Fields {
 #[serde(rename_all = "snake_case")]
 pub enum Join {
     Nothing,
+    Blocks,
     #[default]
     Default,
     All,

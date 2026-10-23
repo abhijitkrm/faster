@@ -163,7 +163,7 @@ pub static TRACE_COLS: &[Col] = &[
 /// Keys that appear on the node's objects but are implied by the row's
 /// position (block hash on a tx, …) and are not kept in `extra`.
 const BLOCK_SKIP: &[&str] = &["transactions"];
-const TX_SKIP: &[&str] = &["blockHash", "blockTimestamp"];
+const TX_SKIP: &[&str] = &["blockHash"];
 const RECEIPT_SKIP: &[&str] = &[
     "transactionHash",
     "transactionIndex",
@@ -173,9 +173,8 @@ const RECEIPT_SKIP: &[&str] = &[
     "to",
     "type",
     "logs",
-    "blockTimestamp",
 ];
-const LOG_SKIP: &[&str] = &["topics", "blockHash", "removed", "blockTimestamp"];
+const LOG_SKIP: &[&str] = &["topics", "blockHash", "removed"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Table {

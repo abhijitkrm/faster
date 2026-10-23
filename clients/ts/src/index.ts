@@ -51,7 +51,7 @@ export interface Query {
   traces?: TraceSelection[];
   blocks?: BlockSelection[];
   include_all_blocks?: boolean;
-  join?: "nothing" | "default" | "all";
+  join?: "nothing" | "blocks" | "default" | "all";
   fields?: Fields;
   max_rows?: number;
   max_ms?: number;

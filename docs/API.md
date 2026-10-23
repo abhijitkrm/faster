@@ -28,7 +28,7 @@ metadata.
   ],
   "blocks": [ { "hash": [], "miner": [] } ],
   "include_all_blocks": false,       // every block header in the range
-  "join": "default",                 // "nothing" | "default" | "all"
+  "join": "default",                 // "nothing" | "blocks" | "default" | "all"
   "fields": {                        // columns per table; ["*"] = all; omitted = defaults
     "block": ["number", "hash", "timestamp"],
     "log": ["block_number", "log_index", "address", "topic0", "data"]
@@ -46,6 +46,7 @@ An empty selection (`{}`) matches every row of its table.
 | `join` | Returned |
 |---|---|
 | `nothing` | only selected rows (headers only with `include_all_blocks`) |
+| `blocks` | selected rows and the header of every block with a result row |
 | `default` | selected rows, the transaction of every selected log and trace, the header of every block with a result row |
 | `all` | `default`, plus every log and trace of every selected transaction |
 

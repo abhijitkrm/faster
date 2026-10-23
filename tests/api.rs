@@ -116,6 +116,16 @@ async fn json_rpc_shape_arrow_and_errors() {
     assert_eq!(*tags.last().unwrap(), 255);
     assert!(tags.contains(&2) && tags.contains(&1) && tags.contains(&0), "logs, joined txs and blocks: {tags:?}");
 
+    // join=blocks: logs and their headers, no transactions.
+    let (_, b) = post(&app, "/query", json!({"from_block": 0, "to_block": 30, "logs": [{"address": [busy]}], "join": "blocks"}), None).await;
+    let v: Value = serde_json::from_slice(&b).unwrap();
+    assert!(!v["logs"].as_array().unwrap().is_empty());
+    assert!(v["transactions"].as_array().unwrap().is_empty());
+    let mut lb: Vec<u64> = v["logs"].as_array().unwrap().iter().map(|l| l["block_number"].as_u64().unwrap()).collect();
+    lb.dedup();
+    let bb: Vec<u64> = v["blocks"].as_array().unwrap().iter().map(|b| b["number"].as_u64().unwrap()).collect();
+    assert_eq!(lb, bb);
+
     // Errors.
     let (s, b) = post(&app, "/query", json!({"from_block": 0, "logs": [{"address": ["0x12"]}]}), None).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&b));
