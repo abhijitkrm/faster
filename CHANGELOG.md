@@ -5,6 +5,31 @@ Format: **[date] — type: description**
 
 ---
 
+## [2026-10-22] — release/v1
+
+### Changed
+- **Explorer backend is now one Rust service, `services/faster`**: chain indexer + embedded
+  RocksDB store + REST/WebSocket API + CLOB API. Replaces `fasterindexer`, `api-go`,
+  Postgres and Redis. Same routes and JSON for the UI.
+- **nginx frontend image** is the single public entry point (UI + proxied API); runtime
+  config via `/config.js`.
+
+### Fixed
+- Indexing capped at 0.5 blocks/s by compose defaults; now ~250K tx/s into the store.
+- No reorg handling; null blocks or missing receipts written as junk rows; checkpoint in an
+  evictable Redis key; wrong address tx counts; `gas_price` not the paid price; block txs
+  ordered by nonce; WebSocket concurrent writes and 60 s disconnect loop; `COUNT(*)` on every
+  table for every stats request.
+
+### Added
+- Keyset cursors (`before=`), address ranking (`/api/addresses`), block tx paging, cache
+  headers, Prometheus metrics, rate limiting, CORS allow-list, request timeouts, RocksDB
+  checkpoint backups, `/ready`, CI (Rust, frontend, clobarchiver, images), top accounts page.
+
+### Removed
+- `services/api-go`, `services/fasterindexer` (and its committed binary), the dead Node
+  services, the Postgres schema, Redis.
+
 ## [2026-08-27]
 
 ### Added

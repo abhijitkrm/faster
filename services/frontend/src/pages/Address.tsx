@@ -1,11 +1,13 @@
+import { fmtEth } from '../format';
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:4000';
+import { API } from '../config';
+import { useWS } from '../context/WSContext';
+import AddressTokens from '../components/AddressTokens';
+import ContractPanel from '../components/ContractPanel';
 
 const fmtNum   = (n) => (n == null ? '—' : Number(n).toLocaleString());
-const fmtEth   = (wei) => { try { return (Number(BigInt(wei)) / 1e18).toFixed(6); } catch { return '0.000000'; } };
-const fmtVal   = (wei) => { try { return (Number(BigInt(wei)) / 1e18).toFixed(4);  } catch { return '0.0000';   } };
 const shortHash = (h) => h ? h.slice(0, 10) + '…' + h.slice(-6) : '';
 const shortAddr = (a) => a ? a.slice(0, 6)  + '…' + a.slice(-4)  : '—';
 
@@ -24,36 +26,8 @@ const fmtTs = (ts) => {
   return new Date(parseInt(ts) * 1000).toLocaleString();
 };
 
-function TypeBadge({ isContract }) {
-  return isContract ? (
-    <span style={{
-      fontSize: 9, fontWeight: 700, letterSpacing: '.14em', textTransform: 'uppercase',
-      padding: '3px 9px', borderRadius: 4,
-      background: 'rgba(163,113,247,.14)', color: 'var(--purple)',
-      border: '1px solid rgba(163,113,247,.3)',
-    }}>Contract</span>
-  ) : (
-    <span style={{
-      fontSize: 9, fontWeight: 700, letterSpacing: '.14em', textTransform: 'uppercase',
-      padding: '3px 9px', borderRadius: 4,
-      background: 'rgba(88,166,255,.1)', color: 'var(--blue)',
-      border: '1px solid rgba(88,166,255,.25)',
-    }}>EOA</span>
-  );
-}
-
 function Row({ label, children }) {
-  return (
-    <div style={{
-      display: 'grid', gridTemplateColumns: '190px 1fr',
-      padding: '10px 20px', borderBottom: '1px solid var(--border)',
-      fontSize: 12, alignItems: 'start',
-    }}>
-      <span style={{ color: 'var(--text-3)', fontWeight: 600, fontSize: 10,
-                     letterSpacing: '.06em', textTransform: 'uppercase', paddingTop: 2 }}>{label}</span>
-      <span style={{ color: 'var(--text-2)', wordBreak: 'break-all' }}>{children}</span>
-    </div>
-  );
+  return <div className="kv"><span>{label}</span><span>{children}</span></div>;
 }
 
 function BytecodeBlock({ bytecode }) {
@@ -75,13 +49,13 @@ function BytecodeBlock({ bytecode }) {
         <button onClick={copy} style={{
           background: 'none', border: '1px solid var(--border-hi)', borderRadius: 5,
           color: copied ? 'var(--green)' : 'var(--text-3)', cursor: 'pointer',
-          fontSize: 9, fontWeight: 700, letterSpacing: '.1em', padding: '2px 8px',
+          fontSize: 12, fontWeight: 700, letterSpacing: '.1em', padding: '2px 8px',
           textTransform: 'uppercase', transition: 'all .15s',
-        }}>{copied ? '✓ Copied' : 'Copy'}</button>
-        <span style={{ fontSize: 10, color: 'var(--text-3)' }}>{hex.length / 2} bytes · {rows.length} rows</span>
+        }}>{copied ? 'Copied' : 'Copy'}</button>
+        <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{hex.length / 2} bytes · {rows.length} rows</span>
       </div>
       <pre style={{
-        fontFamily: 'monospace', fontSize: 10.5, lineHeight: 1.7,
+        fontFamily: 'var(--mono)', fontSize: 12, lineHeight: 1.7,
         color: 'var(--text-3)', background: 'var(--surface-2)',
         border: '1px solid var(--border)', borderRadius: 6,
         padding: '12px 14px', margin: 0,
@@ -108,17 +82,33 @@ function BytecodeBlock({ bytecode }) {
 }
 
 export default function Address() {
+  const { features } = useWS();
   const { address } = useParams();
   const [data,   setData]   = useState(null);
   const [page,   setPage]   = useState(1);
   const [copied, setCopied] = useState(false);
+  // cursors[i] is the `before` cursor that loads page i + 1 (page 1 has
+  // none). Keyset paging costs the same at any depth, unlike ?page=.
+  const [cursors, setCursors] = useState([null]);
 
-  const load = useCallback((p) => {
-    fetch(`${API}/api/addresses/${address}?page=${p}&limit=25`)
-      .then(r => r.json()).then(d => { setData(d); setPage(p); }).catch(() => {});
+  const load = useCallback((p, cur) => {
+    const before = cur[p - 1];
+    const q = before ? `before=${before}` : 'page=1';
+    fetch(`${API}/api/addresses/${address}?${q}&limit=25`)
+      .then(r => r.json())
+      .then(d => {
+        setData(d);
+        setPage(p);
+        setCursors(c => {
+          const next = c.slice(0, p);
+          next[p] = d.next_cursor || null;
+          return next;
+        });
+      })
+      .catch(() => {});
   }, [address]);
 
-  useEffect(() => { load(1); }, [load]);
+  useEffect(() => { setCursors([null]); load(1, [null]); }, [load]);
 
   const copy = () => {
     navigator.clipboard.writeText(address).then(() => {
@@ -135,39 +125,34 @@ export default function Address() {
 
   return (
     <div>
-      {/* ── Header bar ── */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16,
-        background: 'var(--surface)', border: '1px solid var(--border)',
-        borderRadius: 10, padding: '12px 18px',
-      }}>
-        <TypeBadge isContract={isContract} />
-        <span style={{ fontFamily: 'monospace', fontSize: 12, color: 'var(--text-2)',
-                       wordBreak: 'break-all', flex: 1 }}>{address}</span>
-        <button onClick={copy} style={{
-          background: 'none', border: '1px solid var(--border-hi)', borderRadius: 6,
-          color: copied ? 'var(--green)' : 'var(--text-2)', cursor: 'pointer',
-          fontSize: 10, fontWeight: 700, letterSpacing: '.1em', padding: '4px 10px',
-          textTransform: 'uppercase', transition: 'all .15s', whiteSpace: 'nowrap',
-        }}>{copied ? '✓ Copied' : 'Copy'}</button>
+      {/* ── Header ── */}
+      <div style={{ marginBottom: 24 }}>
+        <div className="eyebrow">{isContract ? 'Contract' : 'Address'}</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12, marginTop: 10 }}>
+          <h1 className="mono" style={{ margin: 0, fontSize: 20, fontWeight: 500, wordBreak: 'break-all' }}>{address.toLowerCase()}</h1>
+          <button type="button" className="nav-link" style={{ minHeight: 32 }} onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>
+          {data.verified && <span className="badge badge-ok">Verified · {data.verified.name}</span>}
+          {isContract && <Link to={`/token/${address}`} className="panel-link">Token page →</Link>}
+          {features.clob && <Link to={`/clob/trader/${address}`} className="panel-link">CLOB history →</Link>}
+        </div>
       </div>
 
       {/* ── Stats cards ── */}
       <div className="addr-card" style={{ marginBottom: 18 }}>
         <div className="addr-stat">
           <div className="metric-label">Balance</div>
-          <div className="metric-value green" style={{ fontSize: 18 }}>{fmtEth(data.balance)}</div>
-          <div className="metric-sub">ETH</div>
+          <div className="metric-value" style={{ fontSize: 22 }}>{data.balance == null ? '—' : fmtEth(data.balance)}<span className="unit">ETH</span></div>
+          <div className="metric-sub">live from the node</div>
         </div>
         <div className="addr-stat">
           <div className="metric-label">Transactions</div>
-          <div className="metric-value blue" style={{ fontSize: 18 }}>{fmtNum(data.total_transactions)}</div>
+          <div className="metric-value" style={{ fontSize: 22 }}>{fmtNum(data.total_transactions)}</div>
           <div className="metric-sub">Total indexed</div>
         </div>
         {isContract ? (
           <div className="addr-stat">
             <div className="metric-label">Bytecode Size</div>
-            <div className="metric-value" style={{ fontSize: 18, color: 'var(--purple)' }}>
+            <div className="metric-value" style={{ fontSize: 22 }}>
               {data.bytecode_size ? fmtNum(data.bytecode_size) : '—'}
             </div>
             <div className="metric-sub">bytes</div>
@@ -175,14 +160,14 @@ export default function Address() {
         ) : (
           <div className="addr-stat">
             <div className="metric-label">First Seen</div>
-            <div style={{ fontSize: 11, marginTop: 6, color: 'var(--text-2)' }}>
+            <div style={{ fontSize: 12, marginTop: 6, color: 'var(--text-2)' }}>
               {data.first_seen ? new Date(data.first_seen).toLocaleString() : '—'}
             </div>
           </div>
         )}
         <div className="addr-stat">
           <div className="metric-label">Last Active</div>
-          <div style={{ fontSize: 11, marginTop: 6, color: 'var(--text-2)' }}>
+          <div style={{ fontSize: 12, marginTop: 6, color: 'var(--text-2)' }}>
             {data.last_seen ? new Date(data.last_seen).toLocaleString() : '—'}
           </div>
         </div>
@@ -191,32 +176,20 @@ export default function Address() {
       {/* ── Contract info panel (contracts only) ── */}
       {isContract && (
         <div style={{ marginBottom: 18 }}>
-          <div className="page-head">
-            <span className="page-title">Contract Info</span>
-          </div>
-          <div className="panel">
-            <Row label="Type">
-              <span style={{ color: 'var(--purple)', fontWeight: 600 }}>Smart Contract</span>
-            </Row>
-            <Row label="Bytecode Size">
-              {data.bytecode_size ? `${fmtNum(data.bytecode_size)} bytes` : '—'}
-            </Row>
-            {data.bytecode && (
-              <Row label="Bytecode">
-                <BytecodeBlock bytecode={data.bytecode} />
-              </Row>
-            )}
+          <ContractPanel address={address} verified={!!data.verified} />
+          <div className="panel" style={{ marginTop: 18 }}>
+            <div className="panel-head"><h2 className="panel-title" style={{ margin: 0 }}>Deployment</h2></div>
             {deployInfo ? (
               <>
                 <Row label="Creator">
                   <Link to={`/address/${deployInfo.from_address}`} className="addr-link"
-                    style={{ fontFamily: 'monospace', fontSize: 11 }}>
+                    style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>
                     {deployInfo.from_address}
                   </Link>
                 </Row>
                 <Row label="Deploy Transaction">
                   <Link to={`/tx/${deployInfo.hash}`} className="hash-link"
-                    style={{ fontFamily: 'monospace', fontSize: 11 }}>
+                    style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>
                     {deployInfo.hash}
                   </Link>
                 </Row>
@@ -225,7 +198,7 @@ export default function Address() {
                     #{fmtNum(deployInfo.block_number)}
                   </Link>
                   {deployInfo.block_timestamp && (
-                    <span style={{ color: 'var(--text-3)', marginLeft: 10, fontSize: 11 }}>
+                    <span style={{ color: 'var(--text-3)', marginLeft: 10, fontSize: 12 }}>
                       {fmtTs(deployInfo.block_timestamp)} ({timeAgo(deployInfo.block_timestamp)})
                     </span>
                   )}
@@ -233,7 +206,13 @@ export default function Address() {
               </>
             ) : (
               <Row label="Deployment">
-                <span style={{ color: 'var(--text-3)' }}>Not found in indexed transactions</span>
+                <span style={{ color: 'var(--text-3)' }}>Created by another contract or before the first indexed block</span>
+              </Row>
+            )}
+            {data.bytecode && (
+              <Row label="Bytecode">
+                <details><summary style={{ cursor: 'pointer', color: 'var(--text-2)' }}>{fmtNum(data.bytecode_size)} bytes</summary>
+                  <div style={{ marginTop: 10 }}><BytecodeBlock bytecode={data.bytecode} /></div></details>
               </Row>
             )}
           </div>
@@ -272,7 +251,7 @@ export default function Address() {
                     const isCreate = !tx.to_address;
                     return (
                       <tr key={tx.hash}>
-                        <td style={{ fontSize: 11 }}>
+                        <td style={{ fontSize: 12 }}>
                           <Link to={`/tx/${tx.hash}`} className="hash-link">
                             <span className="hash-cell">{shortHash(tx.hash)}</span>
                           </Link>
@@ -285,31 +264,31 @@ export default function Address() {
                         <td style={{ textAlign: 'center' }}>
                           {isCreate ? (
                             <span style={{
-                              display:'inline-block', fontSize:9, fontWeight:700,
+                              display:'inline-block', fontSize: 12, fontWeight:700,
                               letterSpacing:'.08em', padding:'2px 7px', borderRadius:3,
                               background:'rgba(163,113,247,.12)', color:'var(--purple)',
                               border:'1px solid rgba(163,113,247,.3)',
                             }}>CREATE</span>
                           ) : isSelf ? (
                             <span style={{
-                              display:'inline-block', fontSize:9, fontWeight:700,
+                              display:'inline-block', fontSize: 12, fontWeight:700,
                               letterSpacing:'.08em', padding:'2px 7px', borderRadius:3,
                               background:'rgba(255,179,71,.1)', color:'var(--yellow)',
                               border:'1px solid rgba(255,179,71,.25)',
                             }}>SELF</span>
                           ) : isOut ? (
                             <span style={{
-                              display:'inline-block', fontSize:9, fontWeight:700,
+                              display:'inline-block', fontSize: 12, fontWeight:700,
                               letterSpacing:'.08em', padding:'2px 7px', borderRadius:3,
                               background:'rgba(255,87,87,.1)', color:'var(--red)',
                               border:'1px solid rgba(255,87,87,.25)',
                             }}>OUT</span>
                           ) : (
                             <span style={{
-                              display:'inline-block', fontSize:9, fontWeight:700,
+                              display:'inline-block', fontSize: 12, fontWeight:700,
                               letterSpacing:'.08em', padding:'2px 7px', borderRadius:3,
-                              background:'rgba(0,255,136,.1)', color:'var(--green)',
-                              border:'1px solid rgba(0,255,136,.25)',
+                              background:'var(--acc-dim)', color:'var(--green)',
+                              border:'1px solid #3B4A1A',
                             }}>IN</span>
                           )}
                         </td>
@@ -324,11 +303,11 @@ export default function Address() {
                               <span className="addr-cell">{shortAddr(tx.to_address)}</span>
                             </Link>
                           ) : (
-                            <span style={{ color: 'var(--text-3)', fontSize: 10 }}>Contract Create</span>
+                            <span style={{ color: 'var(--text-3)', fontSize: 12 }}>Contract Create</span>
                           )}
                         </td>
                         <td style={{ textAlign: 'right', color: tx.value === '0' ? 'var(--text-3)' : 'var(--text)' }}>
-                          {fmtVal(tx.value)}
+                          {fmtEth(tx.value)}
                         </td>
                         <td style={{ textAlign: 'right' }}>
                           {tx.status === 1   && <span className="badge badge-ok">OK</span>}
@@ -349,20 +328,22 @@ export default function Address() {
               {totalPages > 1 && (
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center',
                               gap: 8, padding: '14px 20px', borderTop: '1px solid var(--border)' }}>
-                  <button onClick={() => load(page - 1)} disabled={page <= 1}
+                  <button onClick={() => load(page - 1, cursors)} disabled={page <= 1}
                     style={pagerStyle(page <= 1)}>← Prev</button>
-                  <span style={{ fontSize: 10, color: 'var(--text-3)', letterSpacing: '.1em',
+                  <span style={{ fontSize: 12, color: 'var(--text-3)', letterSpacing: '.1em',
                                  textTransform: 'uppercase' }}>
                     Page {page} / {totalPages}
                   </span>
-                  <button onClick={() => load(page + 1)} disabled={page >= totalPages}
-                    style={pagerStyle(page >= totalPages)}>Next →</button>
+                  <button onClick={() => load(page + 1, cursors)} disabled={!cursors[page]}
+                    style={pagerStyle(!cursors[page])}>Next →</button>
                 </div>
               )}
             </>
           )
         }
       </div>
+
+      <AddressTokens address={address} />
     </div>
   );
 }
@@ -373,7 +354,7 @@ const pagerStyle = (disabled) => ({
   borderRadius: 6,
   color: disabled ? 'var(--text-3)' : 'var(--text-2)',
   cursor: disabled ? 'not-allowed' : 'pointer',
-  fontSize: 10,
+  fontSize: 12,
   fontWeight: 700,
   letterSpacing: '.1em',
   padding: '4px 12px',

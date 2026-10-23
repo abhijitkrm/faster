@@ -1,10 +1,12 @@
+import { fmtEth } from '../format';
 import { useEffect, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
+import ClobBlockSection from '../components/ClobBlockSection';
+import { useWS } from '../context/WSContext';
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:4000';
+import { API } from '../config';
 
 const fmtNum  = (n) => (n == null ? '—' : Number(n).toLocaleString());
-const fmtVal  = (wei) => { try { return (Number(BigInt(wei)) / 1e18).toFixed(4); } catch { return '0.0000'; } };
 const shortHash = (h) => h ? h.slice(0, 10) + '…' + h.slice(-6) : '';
 const shortAddr = (a) => a ? a.slice(0, 6)  + '…' + a.slice(-4)  : 'Contract';
 
@@ -24,22 +26,27 @@ const fmtTs = (ts) => {
 };
 
 const Row = ({ label, children }) => (
-  <div style={{
-    display: 'grid', gridTemplateColumns: '200px 1fr',
-    padding: '10px 20px', borderBottom: '1px solid var(--border)',
-    fontSize: 12, alignItems: 'start',
-  }}>
-    <span style={{ color: 'var(--text-3)', fontWeight: 600, letterSpacing: '.06em',
-                   fontSize: 10, textTransform: 'uppercase', paddingTop: 2 }}>{label}</span>
-    <span style={{ color: 'var(--text-2)', wordBreak: 'break-all' }}>{children}</span>
-  </div>
+  <div className="kv"><span>{label}</span><span>{children}</span></div>
 );
 
 export default function BlockDetail() {
   const { number } = useParams();
   const navigate   = useNavigate();
+  const { features } = useWS();
   const [block, setBlock] = useState(null);
   const [notFound, setNotFound] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  // Blocks inline at most 500 txs; fetch the rest a page at a time.
+  const loadMore = () => {
+    if (!block || loadingMore) return;
+    setLoadingMore(true);
+    fetch(`${API}/api/blocks/${block.number}/transactions?offset=${block.transactions.length}&limit=1000`)
+      .then(r => r.json())
+      .then(d => setBlock(b => ({ ...b, transactions: [...b.transactions, ...(d.transactions || [])] })))
+      .catch(() => {})
+      .finally(() => setLoadingMore(false));
+  };
 
   useEffect(() => {
     setBlock(null); setNotFound(false);
@@ -53,16 +60,15 @@ export default function BlockDetail() {
     <div className="empty" style={{ paddingTop: 60 }}>
       Block {number} not found — may not be indexed yet.
       <div style={{ marginTop: 16 }}>
-        <Link to="/blocks" className="nav-link" style={{ fontSize: 11 }}>← Back to blocks</Link>
+        <Link to="/blocks" className="nav-link" style={{ fontSize: 12 }}>← Back to blocks</Link>
       </div>
+      {features.clob && /^\d+$/.test(number) && <div style={{ textAlign: 'left' }}><ClobBlockSection height={number} /></div>}
     </div>
   );
 
   if (!block) return <div className="empty">Loading block…</div>;
 
-  const gasUsedPct = block.gas_limit > 0
-    ? ((block.gas_used / block.gas_limit) * 100).toFixed(1)
-    : '0';
+  const gasUsedPct = block.gas_limit > 0 ? (block.gas_used / block.gas_limit) * 100 : 0;
 
   return (
     <div>
@@ -84,16 +90,16 @@ export default function BlockDetail() {
       <div className="panel" style={{ marginBottom: 18 }}>
         <div className="panel-head">
           <span className="panel-title">Overview</span>
-          <span style={{ fontSize: 10, color: 'var(--text-3)' }}>{timeAgo(block.timestamp)}</span>
+          <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{timeAgo(block.timestamp)}</span>
         </div>
 
         <Row label="Block Hash">
-          <span style={{ fontFamily: 'monospace', fontSize: 11 }}>{block.hash}</span>
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{block.hash}</span>
         </Row>
         <Row label="Parent Hash">
           {block.parent_hash
             ? <Link to={`/blocks/${Number(block.number) - 1}`} className="num-link"
-                style={{ fontFamily: 'monospace', fontSize: 11 }}>{block.parent_hash}</Link>
+                style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{block.parent_hash}</Link>
             : '—'}
         </Row>
         <Row label="Timestamp">
@@ -101,7 +107,7 @@ export default function BlockDetail() {
           <span style={{ color: 'var(--text-3)', marginLeft: 8 }}>({timeAgo(block.timestamp)})</span>
         </Row>
         <Row label="Miner">
-          <Link to={`/address/${block.miner}`} className="addr-link" style={{ fontFamily: 'monospace', fontSize: 11 }}>
+          <Link to={`/address/${block.miner}`} className="addr-link" style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>
             {block.miner}
           </Link>
         </Row>
@@ -112,8 +118,8 @@ export default function BlockDetail() {
         </Row>
         <Row label="Gas Used">
           <span>{fmtNum(block.gas_used)}</span>
-          <span style={{ color: 'var(--text-3)', marginLeft: 10, fontSize: 11 }}>
-            ({gasUsedPct}% of {fmtNum(block.gas_limit)})
+          <span style={{ color: 'var(--text-3)', marginLeft: 10, fontSize: 12 }}>
+            ({gasUsedPct.toFixed(1)}% of {fmtNum(block.gas_limit)})
           </span>
           {/* Gas usage bar */}
           <div style={{ marginTop: 6, height: 4, width: 200, background: 'var(--surface-2)',
@@ -125,7 +131,7 @@ export default function BlockDetail() {
         </Row>
         {block.state_root && (
           <Row label="State Root">
-            <span style={{ fontFamily: 'monospace', fontSize: 10, color: 'var(--text-3)' }}>{block.state_root}</span>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-3)' }}>{block.state_root}</span>
           </Row>
         )}
       </div>
@@ -133,7 +139,7 @@ export default function BlockDetail() {
       {/* Transactions */}
       <div className="page-head">
         <span className="page-title">Transactions</span>
-        <span className="page-count">{(block.transactions || []).length} in this block</span>
+        <span className="page-count">{Number(block.transactions_count).toLocaleString()} in this block</span>
       </div>
       <div className="panel">
         {(!block.transactions || block.transactions.length === 0)
@@ -151,7 +157,7 @@ export default function BlockDetail() {
               <tbody>
                 {block.transactions.map(tx => (
                   <tr key={tx.hash}>
-                    <td style={{ color: 'var(--text-2)', fontSize: 11 }}>
+                    <td style={{ color: 'var(--text-2)', fontSize: 12 }}>
                       <span className="hash-cell">{shortHash(tx.hash)}</span>
                     </td>
                     <td>
@@ -165,7 +171,7 @@ export default function BlockDetail() {
                       </Link>
                     </td>
                     <td style={{ textAlign: 'right', color: tx.value === '0' ? 'var(--text-3)' : 'var(--text)' }}>
-                      {fmtVal(tx.value)}
+                      {fmtEth(tx.value)}
                     </td>
                     <td style={{ textAlign: 'right', color: 'var(--text-2)' }}>
                       {tx.gas_used ? fmtNum(tx.gas_used) : '—'}
@@ -182,6 +188,16 @@ export default function BlockDetail() {
           )
         }
       </div>
+
+      {(block.transactions || []).length < block.transactions_count && (
+        <div style={{ textAlign: 'center', margin: '12px 0' }}>
+          <button onClick={loadMore} disabled={loadingMore} style={navBtnStyle}>
+            {loadingMore ? 'Loading…' : `Load more (${(block.transactions_count - block.transactions.length).toLocaleString()} remaining)`}
+          </button>
+        </div>
+      )}
+
+      {features.clob && <ClobBlockSection height={block.number} />}
     </div>
   );
 }
@@ -192,7 +208,7 @@ const navBtnStyle = {
   borderRadius: 6,
   color: 'var(--text-2)',
   cursor: 'pointer',
-  fontSize: 10,
+  fontSize: 12,
   fontWeight: 700,
   letterSpacing: '.1em',
   padding: '4px 12px',

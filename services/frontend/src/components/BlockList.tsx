@@ -31,7 +31,7 @@ export default function BlockList({ blocks, newHashes }) {
         {blocks.map(b => (
           <tr key={b.hash} className={newHashes?.has(b.hash) ? 'is-new' : ''}>
             <td><Link to={`/blocks/${b.number}`} className="num-link">#{Number(b.number).toLocaleString()}</Link></td>
-            <td style={{color:'var(--text-3)',fontSize:11}}><span className="hash-cell">{b.hash}</span></td>
+            <td style={{color:'var(--text-3)',fontSize: 12}}><span className="hash-cell">{b.hash}</span></td>
             <td>
               <Link to={'/address/' + b.miner} className="addr-link">
                 <span className="addr-cell">{shortAddr(b.miner)}</span>

@@ -1,317 +1,116 @@
-# EVM Block Explorer - Deployment Guide
+# Deployment and operations
 
-## Quick Start
+## Topology
 
-### 1. Prerequisites
-- Docker & Docker Compose (latest version)
-- macOS, Linux, or Windows (with WSL2)
-- 8GB+ RAM recommended
+```
+browser ──► frontend (nginx :8080, published as $HTTP_PORT, default 4000)
+              ├─ /            UI (static build)
+              └─ /api /stats /health /ready /ws ──► faster :3000 (not published)
+                                                      ├─ RocksDB store (volume faster-data)
+                                                      ├─ node JSON-RPC (RPC_URL)
+                                                      ├─ ClickHouse :8123 (CLOB history, optional)
+                                                      └─ admin :9100 (metrics, backups; compose network only)
+clobarchiver ──► ClickHouse (optional)
+```
 
-### 2. Setup Environment
+nginx is the only public port. It overwrites `X-Forwarded-For` with the client
+address and faster trusts that header (`TRUST_PROXY_HEADERS=true`), which is
+safe only while faster itself is unreachable from outside. If you expose
+faster directly, set `TRUST_PROXY_HEADERS=false`.
+
+## Configuration (`.env`)
+
+| Variable | Default | |
+|---|---|---|
+| `RPC_URL` | — | node JSON-RPC (required). Archive data is not needed; receipts are. |
+| `HTTP_PORT` | 4000 | public port |
+| `START_BLOCK` | 0 | first block for an empty store |
+| `CONFIRMATIONS` | 0 | stay this many blocks behind the tip (0: follow the tip, roll back on reorgs) |
+| `REORG_DEPTH` | 256 | deepest reorg handled; deeper stops the process (resync needed) |
+| `FETCH_BATCH` / `FETCH_CONCURRENCY` | 10 / 16 | blocks per RPC batch / batches in flight; lower them for rate-limited providers |
+| `CACHE_MB` | 512 | RocksDB block cache |
+| `VERIFIER_ENABLED` | true | contract verification (downloads official solc releases on first use; needs egress to binaries.soliditylang.org) |
+| `SOLC_DIR` | `$DATA_DIR/solc` | compiler cache |
+| `TRACE_CALLS` | false | index internal transactions (needs `debug_traceBlockByNumber`; archive node for history) |
+| `RATE_LIMIT_RPS` / `RATE_LIMIT_BURST` | 100 / 200 | per client IP; 0 disables |
+| `CORS_ORIGINS` | `*` | comma-separated allow-list for browsers on other origins |
+| `FASTER_API_URL` | empty | UI → API base URL; empty = same origin (via nginx) |
+| `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` | clob / clob | CLOB archive; change for production |
+| `NODE_RPC` | host.docker.internal:8545 | evm-node with `CLOB_ARCHIVE=1`, for clobarchiver |
+| `LOG_LEVEL` | info | |
+
+All faster settings are listed in [STORE.md](STORE.md#configuration).
+
+## Start, upgrade, stop
 
 ```bash
-cd /Users/sysadmin/Desktop/explorer/realtime
-
-# The .env file is already configured with your endpoints:
-# RPC_URL=http://34.220.79.132:8545/
-# WS_URL=ws://34.220.79.132:8546
+cp .env.example .env && $EDITOR .env
+docker compose up -d --build
+docker compose logs -f faster          # "progress" lines every 10 s: head, tip, lag, blocks/s
+curl -s localhost:4000/ready           # 200 once caught up
 ```
 
-### 3. Start the Explorer
+Upgrades: `docker compose up -d --build faster`. faster stops on SIGTERM
+(grace period 30 s); every commit is atomic, so a hard kill is also safe and
+indexing resumes from the last committed block. A binary with a different
+store schema version refuses to open the store and says so: wipe the
+`faster-data` volume (or restore a backup of the matching version) and let it
+resync.
+
+## Capacity
+
+- Disk: about 0.4 KB per transaction with a log, before compaction gains
+  (1.1M txs ≈ 0.45 GB). Use SSD/NVMe.
+- Memory: `CACHE_MB` plus RocksDB memtables (~64 MB per column family while
+  writing) plus the process (~100 MB).
+- CPU: catching up uses several cores (JSON decoding and parallel writes); at
+  the tip it is mostly idle. Catch-up speed is usually bounded by the node:
+  raise `FETCH_CONCURRENCY` if the node has headroom.
+
+## Monitoring
+
+Prometheus scrape target `faster:9100/metrics` (see `config/prometheus.yml`).
+Useful series:
+
+- `faster_lag_blocks` — alert if > 20 for 5 minutes
+- `faster_rpc_requests_total{result="error"}` rate — node trouble
+- `faster_reorgs_total`, `faster_rolled_back_blocks_total`
+- `faster_commit_seconds` — store write latency
+- `faster_http_seconds{route=...}` — API latency per route
+- `faster_rate_limited_total`, `faster_ws_clients`, `faster_ws_dropped_slow_total`
+
+Kubernetes-style probes: liveness `GET /health`, readiness `GET /ready`.
+
+## Backups
+
+The store can always be rebuilt from the chain, but a backup makes recovery
+minutes instead of a resync:
 
 ```bash
-# Build and start all services
-docker-compose up -d
-
-# Check status
-docker-compose ps
-
-# View logs
-docker-compose logs -f
+docker compose exec faster curl -s -X POST localhost:9100/admin/checkpoint
+# {"path":"/data/backups/checkpoint-1792678379","head":123456}
 ```
 
-### 4. Access the Application
-
-- **Frontend**: http://localhost:3001
-- **API**: http://localhost:3000
-- **Prometheus**: http://localhost:9090
-- **Database**: localhost:5432
-
-### 5. Stop the Explorer
-
-```bash
-docker-compose down
-
-# To completely remove volumes/data:
-docker-compose down -v
-```
-
----
-
-## Service Details
-
-### Block Listener
-- **Port**: 3100 (health check)
-- **Function**: Polls RPC for new blocks and transactions
-- **Data Flow**: RPC → Redis Streams
-- **Config**: `services/block-listener/src/index.js`
-
-### Indexer
-- **Port**: 3101 (health check)
-- **Function**: Processes events from Redis into PostgreSQL
-- **Data Flow**: Redis Streams → Database
-- **Config**: `services/indexer/src/index.js`
-
-### API Server
-- **Port**: 3000 (REST + WebSocket)
-- **Endpoints**:
-  - `GET /health` - Health check
-  - `GET /stats` - Global statistics
-  - `GET /api/blocks` - Latest blocks
-  - `GET /api/blocks/:number` - Block details
-  - `GET /api/transactions` - Latest transactions
-  - `GET /api/transactions/:hash` - Transaction details
-  - `GET /api/addresses` - Top addresses
-  - `GET /api/addresses/:address` - Address activity
-  - `WS /` - WebSocket for real-time updates
-
-### Frontend
-- **Port**: 3001
-- **Features**:
-  - Real-time block and transaction display
-  - Address search and activity tracking
-  - Statistics dashboard
-  - Responsive design
-
-### Database (PostgreSQL)
-- **Port**: 5432
-- **Database**: explorer
-- **Tables**: blocks, transactions, logs, addresses, statistics, sync_status
-- **Volume**: postgres-data (persisted between restarts)
-
-### Cache (Redis)
-- **Port**: 6379
-- **Purpose**: Message queues (block/transaction streams), caching
-- **Volume**: redis-data (persisted between restarts)
-
-### Monitoring (Prometheus)
-- **Port**: 9090
-- **Config**: `config/prometheus.yml`
-- **Metrics**: Available at various `/metrics` endpoints
-
----
-
-## Troubleshooting
-
-### Service won't start
-```bash
-# Check logs
-docker-compose logs [service-name]
-
-# Restart service
-docker-compose restart [service-name]
-```
-
-### Database connection error
-```bash
-# Verify PostgreSQL is running
-docker-compose ps postgres
-
-# Check database logs
-docker-compose logs postgres
-
-# Reinitialize database
-docker-compose down -v
-docker-compose up -d postgres
-docker-compose up indexer
-```
-
-### No data appearing
-1. Check block-listener logs: `docker-compose logs block-listener`
-2. Verify RPC/WS URLs in `.env`
-3. Check Redis: `docker exec explorer-redis redis-cli PING`
-4. Check database: `docker exec explorer-postgres psql -U explorer -d explorer -c "SELECT COUNT(*) FROM blocks;"`
-
-### High Memory Usage
-- Increase Docker memory limit
-- Reduce Redis memory: Edit `docker-compose.yml` maxmemory value
-- Enable database query optimization
-
----
-
-## Configuration
-
-### Environment Variables
-
-Edit `.env` to customize:
-
-```bash
-# RPC Endpoints
-RPC_URL=http://34.220.79.132:8545/
-WS_URL=ws://34.220.79.132:8546
-
-# Database
-DB_USER=explorer
-DB_PASSWORD=explorer_secure_password_2026
-
-# Log level: debug, info, warn, error
-LOG_LEVEL=info
-
-# Batch sizes for performance tuning
-INDEXER_BATCH_SIZE=100
-BLOCK_LISTENER_BATCH_SIZE=50
-```
-
-### Performance Tuning
-
-1. **Block Listener**:
-   - Increase `BLOCK_LISTENER_BATCH_SIZE` for faster indexing (higher CPU/memory)
-   - Decrease polling interval in `services/block-listener/src/index.js`
-
-2. **Indexer**:
-   - Increase `INDEXER_BATCH_SIZE` for faster database writes
-   - Add database indexes for frequent queries
-
-3. **API**:
-   - Add caching headers for GET requests
-   - Enable compression with reverse proxy (nginx)
-
-4. **Database**:
-   ```sql
-   -- Analyze query performance
-   ANALYZE;
-   
-   -- Check index usage
-   SELECT schemaname, tablename, indexname FROM pg_indexes;
-   ```
-
----
-
-## Monitoring & Observability
-
-### Health Checks
-
-All services expose health endpoints:
-- Block Listener: http://localhost:3100/health
-- Indexer: http://localhost:3101/health
-- API: http://localhost:3000/health
-
-### Prometheus Metrics
-
-Access at http://localhost:9090
-
-Common queries:
-```
-# Service uptime
-up{job="api"}
-
-# Request throughput
-rate(http_requests_total[5m])
-
-# Error rate
-rate(http_requests_total{status=~"5.."}[5m])
-```
-
-### Log Aggregation
-
-View logs from all services:
-```bash
-docker-compose logs --timestamps --tail=100 -f
-```
-
----
-
-## Database Backup & Restore
-
-### Backup
-```bash
-# Create backup
-docker exec explorer-postgres pg_dump -U explorer explorer > backup.sql
-
-# Create volume backup
-docker run --rm -v explorer-realtime_postgres-data:/data -v $(pwd):/backup \
-  postgres:15-alpine tar czf /backup/postgres-backup.tar.gz -C /data .
-```
-
-### Restore
-```bash
-# Restore from SQL dump
-docker exec -i explorer-postgres psql -U explorer explorer < backup.sql
-
-# Restore from volume backup
-docker run --rm -v explorer-realtime_postgres-data:/data -v $(pwd):/backup \
-  postgres:15-alpine tar xzf /backup/postgres-backup.tar.gz -C /data
-```
-
----
-
-## Security Considerations
-
-⚠️ **For Production:**
-
-1. Change default passwords in `.env`
-2. Use environment secrets management (docker secrets, vault)
-3. Add authentication to API endpoints
-4. Enable SSL/TLS with reverse proxy (nginx)
-5. Implement rate limiting
-6. Use firewall rules to restrict access
-7. Regular security updates
-8. Monitor for suspicious activity
-
-### Add Basic Auth (nginx reverse proxy)
-
-Create `nginx.conf`:
-```nginx
-upstream api {
-  server api:3000;
-}
-
-server {
-  listen 80;
-  server_name _;
-
-  location / {
-    auth_basic "Restricted";
-    auth_basic_user_file /etc/nginx/.htpasswd;
-    proxy_pass http://api;
-  }
-}
-```
-
-Then add to `docker-compose.yml`:
-```yaml
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-    volumes:
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf
-      - ./htpasswd:/etc/nginx/.htpasswd:ro
-    depends_on:
-      - api
-```
-
----
-
-## Next Steps
-
-1. Start application: `docker-compose up -d`
-2. Monitor logs: `docker-compose logs -f`
-3. Open frontend: http://localhost:3001
-4. Check Prometheus: http://localhost:9090
-5. Review database: `docker exec explorer-postgres psql -U explorer -d explorer`
-
----
-
-## Support & Resources
-
-- Docker Compose: https://docs.docker.com/compose/
-- PostgreSQL: https://www.postgresql.org/docs/
-- Redis: https://redis.io/documentation
-- React: https://react.dev/
-- Ethers.js: https://docs.ethers.org/
-
----
-
-**Last Updated**: March 6, 2026
-**Configuration**: Custom EVM L1 with WebSocket enabled
+A checkpoint is a consistent RocksDB snapshot made of hard links (instant,
+shares disk with the live store until compaction rewrites files). Copy it off
+the volume, then delete it from `/data/backups`. To restore, stop faster, put
+the checkpoint's `hot/` directory at `/data/hot` and start; indexing resumes
+from the checkpoint's head.
+
+## Scaling reads
+
+One instance serves ~90K req/s of lookups. For more, run several faster
+instances, each with its own volume and indexing from the same (or its own)
+node, behind the nginx upstream; they converge to the same data. ClickHouse
+(CLOB history) is shared.
+
+## Security checklist
+
+- Change `CLICKHOUSE_PASSWORD`; keep ClickHouse ports bound to localhost (as in compose).
+- Terminate TLS in front of nginx (or add a TLS server block).
+- Keep the admin port (9100) off public networks; it can create backups.
+- Set `CORS_ORIGINS` if other sites call the API from browsers.
+- Contract verification runs solc releases downloaded from
+  binaries.soliditylang.org (sha256-checked, at most two compilations at a
+  time, 120 s timeout, 20 MB input limit, empty environment). Set
+  `VERIFIER_ENABLED=false` to turn it off.

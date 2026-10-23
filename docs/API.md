@@ -1,418 +1,208 @@
-# EVM Block Explorer - API Reference
+# API reference
 
-## Base URL
+Served by `services/faster`. In the compose deployment the API shares the UI's
+origin (nginx proxies `/api/`, `/stats`, `/health`, `/ready` and `/ws`).
 
-```
-http://localhost:3000/api
-```
+Conventions:
 
-## Authentication
+- Hashes and addresses: lower-case `0x` hex. Inputs are accepted in any case.
+- Block numbers, gas, counts, nonces, indexes: JSON numbers.
+- Wei amounts and prices (`value`, `gas_price`, `balance`, fee fields): decimal
+  strings, since they exceed 2^53.
+- Times: `timestamp` / `block_timestamp` are unix seconds; `first_seen` /
+  `last_seen` are RFC 3339.
+- Errors: `{"error": "..."}` with 400 (bad input), 404, 429 (rate limited,
+  with `Retry-After`), 500, 503, 504 (request took over 15 s).
+- Blocks and txs more than `REORG_DEPTH` below the head are served with
+  `Cache-Control: public, max-age=86400, immutable`; newer data with `no-cache`.
 
-Currently no authentication required. For production, implement JWT or API keys.
+## Blocks
 
----
+| Endpoint | |
+|---|---|
+| `GET /api/blocks?limit=20` | newest blocks (limit ≤ 100) |
+| `GET /api/blocks/range/{start}/{end}` | blocks in a range (≤ 1000), ascending |
+| `GET /api/blocks/{number\|hash}` | one block with up to 500 transactions inline |
+| `GET /api/blocks/{number\|hash}/transactions?offset=0&limit=100` | a block's transactions, in index order (limit ≤ 1000) |
 
-## Blocks Endpoints
+Block fields: `number`, `hash`, `parent_hash`, `timestamp`, `miner`,
+`gas_used`, `gas_limit`, `base_fee_per_gas`, `difficulty`,
+`transactions_count`, `logs_count`, `state_root`, `transactions_root`,
+`receipts_root`, `size`. The detail adds `transactions` and
+`transactions_truncated` (more than 500 txs: page the rest).
 
-### Get Latest Blocks
+## Transactions
 
-```http
-GET /api/blocks?limit=20
-```
+| Endpoint | |
+|---|---|
+| `GET /api/transactions?limit=20` | newest transactions (limit ≤ 100) |
+| `GET /api/transactions/{hash}` | one transaction with its `logs` and `block_hash` |
+| `GET /api/transactions/address/{address}?limit=20&before=` | an address's transactions, newest first |
+| `GET /api/transactions/pending/list` | always `[]` (no mempool view) |
 
-**Query Parameters:**
-- `limit` (int, optional): Number of blocks to return (default: 20, max: 100)
+Transaction fields: `hash`, `block_number`, `block_timestamp`,
+`transaction_index`, `from_address`, `to_address` (null for creations),
+`value`, `gas`, `gas_price` (price actually paid: the receipt's
+`effectiveGasPrice` when the node reports it), `effective_gas_price`,
+`max_fee_per_gas`, `max_priority_fee_per_gas`, `gas_used`, `nonce`,
+`input_data`, `status` (1, 0, or null for pre-Byzantium), `contract_address`,
+`logs_count`, `transaction_type`.
 
-**Response:**
+Logs: `log_index` (block-level), `address`, `topics`, `data`.
+
+## Addresses
+
+| Endpoint | |
+|---|---|
+| `GET /api/addresses?limit=20&offset=0` | addresses by transaction count, highest first |
+| `GET /api/addresses/{address}?limit=25&before=` | summary + transactions, newest first |
+| `GET /api/addresses/{address}?limit=25&page=N` | same, offset paging (cost grows with depth) |
+| `GET /api/addresses/search/by-pattern?pattern=0xab12` | addresses starting with a hex prefix (≥ 3 hex chars) |
+
+Address fields: `address`, `transaction_count` (distinct transactions it is
+party to: sender, recipient or created contract), `first_seen`, `last_seen`,
+`is_contract`, `bytecode`, `bytecode_size`, `deploy_info` (`hash`,
+`block_number`, `block_timestamp`, `from_address` of the creating tx),
+`balance` (live from the node, cached 2 s; null if the node is unavailable),
+`transactions`, `total_transactions`, `page`, `limit`, `next_cursor`.
+
+Paging with cursors: pass the response's `next_cursor` (`"<block>:<index>"`)
+as `before=` to get the next page; `next_cursor` is null on the last page.
+This costs the same at any depth (0.16 ms at 100K deep vs 13 ms with `page=`).
+
+## Tokens
+
+ERC-20, ERC-721 and ERC-1155 transfers are decoded from logs (`Transfer`,
+`TransferSingle`, `TransferBatch`). Balances are derived from transfers, so
+they are exact when indexing starts at block 0 (`START_BLOCK=0`). Name,
+symbol and decimals are read from the contract once, when the token is first
+seen.
+
+| Endpoint | |
+|---|---|
+| `GET /api/tokens?limit=50&offset=0` | tokens by transfer count: `address, type, name, symbol, decimals, holders, transfers, first_block` |
+| `GET /api/tokens/{address}` | one token |
+| `GET /api/tokens/{address}/transfers?limit=25&before=` | its transfers, newest first |
+| `GET /api/tokens/{address}/holders?limit=50&offset=0` | largest holders (`value`: balance, or NFT count for ERC-721) |
+| `GET /api/addresses/{address}/token-transfers?limit=25&before=` | transfers in or out of an address |
+| `GET /api/addresses/{address}/tokens` | tokens held (`value`, and `token_id` for ERC-1155) |
+
+Transfer fields: `block_number`, `block_timestamp`, `transaction_hash`,
+`log_index`, `batch_index` (position in an ERC-1155 batch), `token`,
+`token_type`, `token_symbol`, `token_decimals`, `from_address`, `to_address`,
+`token_id`, `value` (raw integer string), `cursor`. Lists return
+`{"items": [...], "next_cursor": ...}`; pass `next_cursor` as `before=`.
+`GET /api/transactions/{hash}` includes `token_transfers`.
+
+## Search
+
+`GET /api/search?q=` resolves a block number, transaction or block hash,
+address (`type: "token"` if it is a token contract) or token name / symbol
+prefix: `[{"type": "block" | "transaction" | "address" | "token", "value": ...}]`.
+
+## Internal transactions
+
+With `TRACE_CALLS=true` the indexer also fetches `debug_traceBlockByNumber`
+(callTracer) for every block and stores each call made inside a transaction.
+This needs a node that serves traces for every indexed block (an archive node
+for history).
+
+- `GET /api/transactions/{hash}` includes `internal_transactions`
+- `GET /api/addresses/{address}/internal?limit=25&before=` — newest first, cursor paging
+
+Fields: `transaction_index`, `trace_index` (depth-first order within the
+tx), `depth` (1 = called by the tx itself), `type` (CALL, DELEGATECALL,
+STATICCALL, CALLCODE, CREATE, CREATE2, SELFDESTRUCT), `from_address`,
+`to_address`, `value`, `gas`, `gas_used`, `error`; list items add
+`block_number`, `block_timestamp`, `transaction_hash`, `cursor`.
+
+## Contract verification and decoding
+
+Solidity contracts are verified from standard-JSON input with the exact
+compiler release. faster downloads the official solc binary for that release
+(binaries.soliditylang.org, checked against the published sha256), compiles,
+and compares with the chain:
+
+- runtime code: immutables masked, library placeholders taken from the chain;
+- creation code: when the contract was deployed by a transaction, that
+  transaction's input must match the compiled creation code too (so a
+  different constructor or initializer cannot verify); the remainder is
+  recorded as constructor arguments;
+- `full` match: identical including the metadata hash; `partial`: identical
+  code, different metadata (e.g. comments), or a contract created by another
+  contract (runtime code only).
+
+| Endpoint | |
+|---|---|
+| `POST /api/contracts/{address}/verify` | `{"compiler_version": "v0.8.24+commit.e11b9ed9", "contract_name": "src/Token.sol:Token", "standard_json": {...}}` → `{"status": "verified", "match_type": ...}` or `{"status": "failed", "error": ...}` |
+| `GET /api/contracts/{address}` | `name, file, compiler, match_type, abi, sources, settings, constructor_args, verified_at` |
+
+Once verified, `GET /api/transactions/{hash}` adds `decoded_input`
+(`name, signature, params[{name, type, value}]`) for calls to the contract and
+`decoded` on its logs (`params` also carry `indexed`); address details carry
+`verified: {name, match_type, compiler}`.
+
+Foundry: `forge verify-contract --verifier blockscout --verifier-url
+https://<host>/api <address> <path:Name>` (uses the Etherscan-style actions
+below). Hardhat: set the network's `apiURL` to `https://<host>/api`.
+
+## Etherscan-compatible API
+
+`GET /api?module=...&action=...` with Etherscan's envelope
+(`{"status":"1","message":"OK","result":...}`, all values strings):
+
+| module / action | parameters |
+|---|---|
+| `account` / `balance` | `address` |
+| `account` / `balancemulti` | `address` (comma-separated, ≤ 20) |
+| `account` / `txlist` | `address`, `startblock`, `endblock`, `page`, `offset`, `sort` (asc default) |
+| `account` / `tokentx`, `tokennfttx`, `token1155tx` | `address` and/or `contractaddress`, same paging |
+| `account` / `txlistinternal` | `address` or `txhash` (requires `TRACE_CALLS=true`) |
+| `block` / `getblocknumberbytime` | `timestamp`, `closest` (before / after) |
+| `transaction` / `gettxreceiptstatus` | `txhash` |
+| `proxy` / `eth_blockNumber` | — |
+| `contract` / `verifysourcecode` (POST) | `contractaddress`, `sourceCode` (standard JSON), `codeformat=solidity-standard-json-input`, `contractname`, `compilerversion`, `constructorArguements` → guid |
+| `contract` / `checkverifystatus` | `guid` → `Pending in queue` / `Pass - Verified` / `Fail - ...` |
+| `contract` / `getabi`, `getsourcecode` | `address` |
+
+`page × offset` is capped at 10,000 as on Etherscan.
+
+## Stats and health
+
+`GET /stats`:
+
 ```json
-[
-  {
-    "id": 1,
-    "hash": "0x1234...",
-    "number": 12345,
-    "timestamp": 1234567890,
-    "miner": "0x5678...",
-    "gas_used": "9999999",
-    "gas_limit": "30000000",
-    "transactions_count": 156,
-    "created_at": "2026-03-06T10:00:00Z"
-  }
-]
+{"total_blocks":"2202","block_height":"2201","latest_block_timestamp":"1792675773",
+ "total_transactions":"1100001","total_addresses":"1350","total_logs":"219560",
+ "avg_block_time":"1.000","tps":"500.00"}
 ```
 
-### Get Block by Number or Hash
-
-```http
-GET /api/blocks/:number
-```
-
-**Parameters:**
-- `:number` (string): Block number (integer) or block hash (0x...)
-
-**Response:**
-```json
-{
-  "id": 1,
-  "hash": "0x1234...",
-  "number": 12345,
-  "timestamp": 1234567890,
-  "miner": "0x5678...",
-  "gas_used": "9999999",
-  "gas_limit": "30000000",
-  "transactions_count": 156,
-  "transactions": [
-    {
-      "hash": "0xabcd...",
-      "from_address": "0x1111...",
-      "to_address": "0x2222...",
-      "value": "1000000000000000000",
-      "status": 1
-    }
-  ]
-}
-```
-
-### Get Block Range
-
-```http
-GET /api/blocks/range/:start/:end
-```
-
-**Parameters:**
-- `:start` (int): Starting block number
-- `:end` (int): Ending block number (max range: 1000)
-
-**Response:** Array of block summaries
-
----
-
-## Transactions Endpoints
-
-### Get Latest Transactions
-
-```http
-GET /api/transactions?limit=20
-```
-
-**Query Parameters:**
-- `limit` (int, optional): Default 20, max 100
-
-**Response:**
-```json
-[
-  {
-    "hash": "0xabcd...",
-    "block_number": 12345,
-    "from_address": "0x1111...",
-    "to_address": "0x2222...",
-    "value": "1000000000000000000",
-    "gas_price": "45000000000",
-    "status": 1,
-    "created_at": "2026-03-06T10:00:00Z"
-  }
-]
-```
-
-### Get Transaction by Hash
-
-```http
-GET /api/transactions/:hash
-```
-
-**Parameters:**
-- `:hash` (string): Transaction hash (0x...)
-
-**Response:**
-```json
-{
-  "hash": "0xabcd...",
-  "block_number": 12345,
-  "block_hash": "0x1234...",
-  "from_address": "0x1111...",
-  "to_address": "0x2222...",
-  "value": "1000000000000000000",
-  "gas": "21000",
-  "gas_price": "45000000000",
-  "gas_used": "21000",
-  "status": 1,
-  "nonce": 42,
-  "input_data": "0x",
-  "logs": [
-    {
-      "log_index": 0,
-      "address": "0x3333...",
-      "data": "0x1234567890abcdef..."
-    }
-  ]
-}
-```
-
-### Get Transactions by Address
-
-```http
-GET /api/transactions/address/:address?limit=20
-```
-
-**Parameters:**
-- `:address` (string): Ethereum address (0x...)
-
-**Response:** Array of transactions where the address is sender or recipient
-
-### Get Pending Transactions
-
-```http
-GET /api/transactions/pending/list
-```
-
-**Response:** Array of pending transactions (top 20 by gas price)
-
----
-
-## Addresses Endpoints
-
-### Get All Addresses
-
-```http
-GET /api/addresses?limit=20
-```
-
-**Response:**
-```json
-[
-  {
-    "address": "0x1111...",
-    "transaction_count": 1234,
-    "first_seen": "2026-01-01T00:00:00Z",
-    "last_seen": "2026-03-06T10:00:00Z",
-    "is_contract": false
-  }
-]
-```
-
-### Get Address Details
-
-```http
-GET /api/addresses/:address
-```
-
-**Parameters:**
-- `:address` (string): Ethereum address (0x...)
-
-**Response:**
-```json
-{
-  "address": "0x1111...",
-  "transaction_count": 1234,
-  "first_seen": "2026-01-01T00:00:00Z",
-  "last_seen": "2026-03-06T10:00:00Z",
-  "is_contract": false,
-  "balance": "5000000000000000000",
-  "recentTransactions": [
-    {
-      "hash": "0xabcd...",
-      "block_number": 12345,
-      "from_address": "0x1111...",
-      "to_address": "0x2222...",
-      "value": "1000000000000000000",
-      "status": 1,
-      "created_at": "2026-03-06T10:00:00Z"
-    }
-  ]
-}
-```
-
-### Search Addresses
-
-```http
-GET /api/addresses/search/by-pattern?pattern=0x111
-```
-
-**Query Parameters:**
-- `pattern` (string, required): Address pattern to search (min 3 chars, case-insensitive)
-
-**Response:** Array of matching addresses
-
----
-
-## Statistics Endpoint
-
-### Get Global Statistics
-
-```http
-GET /stats
-```
-
-**Response:**
-```json
-{
-  "total_blocks": 12345,
-  "total_transactions": 987654,
-  "total_addresses": 123456,
-  "total_logs": 5000000
-}
-```
-
----
-
-## Health & Status
-
-### Health Check
-
-```http
-GET /health
-```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "timestamp": "2026-03-06T10:00:00Z",
-  "connectedClients": 42
-}
-```
-
----
-
-## WebSocket (Real-Time Updates)
-
-### Connect to WebSocket Stream
-
-```javascript
-const ws = new WebSocket('ws://localhost:3000');
-
-// Subscribe to blocks
-ws.send(JSON.stringify({ type: 'subscribe', stream: 'blocks' }));
-
-// Subscribe to transactions
-ws.send(JSON.stringify({ type: 'subscribe', stream: 'transactions' }));
-
-// Receive updates
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  console.log(data);
-};
-```
-
-### WebSocket Message Format
-
-**Block Update:**
-```json
-{
-  "type": "block",
-  "data": {
-    "number": 12345,
-    "hash": "0x1234...",
-    "timestamp": 1234567890,
-    "transactions_count": 156
-  }
-}
-```
-
-**Transaction Update:**
-```json
-{
-  "type": "transaction",
-  "data": {
-    "hash": "0xabcd...",
-    "from_address": "0x1111...",
-    "to_address": "0x2222...",
-    "value": "1000000000000000000",
-    "status": 1
-  }
-}
-```
-
----
-
-## Error Handling
-
-All errors follow standard HTTP status codes:
-
-- `200`: Success
-- `400`: Bad request (invalid parameters)
-- `404`: Not found (block/transaction/address not found)
-- `500`: Server error
-
-**Error Response:**
-```json
-{
-  "error": "Description of what went wrong"
-}
-```
-
----
-
-## Rate Limiting
-
-Currently not implemented. For production:
-- Implement rate limiting: 100 requests/minute per IP
-- WebSocket connections: 10 concurrent per IP
-- Use reverse proxy (nginx) for rate limiting
-
----
-
-## Examples
-
-### cURL
-
-```bash
-# Get latest blocks
-curl http://localhost:3000/api/blocks
-
-# Get specific block
-curl http://localhost:3000/api/blocks/12345
-
-# Get address details
-curl http://localhost:3000/api/addresses/0x1234567890123456789012345678901234567890
-
-# Get statistics
-curl http://localhost:3000/stats
-```
-
-### JavaScript/Fetch
-
-```javascript
-// Get latest transactions
-const response = await fetch('http://localhost:3000/api/transactions?limit=10');
-const transactions = await response.json();
-
-// Get address
-const address = '0x1234567890123456789012345678901234567890';
-const addressData = await fetch(`http://localhost:3000/api/addresses/${address}`);
-const data = await addressData.json();
-```
-
-### WebSocket JavaScript
-
-```javascript
-const ws = new WebSocket('ws://localhost:3000');
-
-ws.addEventListener('open', () => {
-  // Subscribe to both streams
-  ws.send(JSON.stringify({ type: 'subscribe', stream: 'blocks' }));
-  ws.send(JSON.stringify({ type: 'subscribe', stream: 'transactions' }));
-});
-
-ws.addEventListener('message', (event) => {
-  const { type, data } = JSON.parse(event.data);
-  
-  if (type === 'block') {
-    console.log('New block:', data);
-  } else if (type === 'transaction') {
-    console.log('New transaction:', data);
-  }
-});
-```
-
----
-
-## Response Times (Expected)
-
-- Blocks endpoint: < 100ms
-- Transaction lookup: < 100ms  (cached)
-- Address activity: < 200ms
-- WebSocket updates: < 500ms from chain
-
----
-
-**Last Updated**: March 6, 2026
+`avg_block_time` is over the last 100 blocks; `tps` is the latest block's
+transactions divided by the average block time of the last 20 blocks.
+
+- `GET /health` — `{"status":"ok","timestamp":...,"connectedClients":N}` (liveness)
+- `GET /ready` — 200 when the store is within `READY_MAX_LAG` blocks of the
+  node, else 503; body `{"ready","head","tip","lag"}`
+
+## WebSocket
+
+Connect to `/ws` (or `/`). The server sends JSON text frames:
+
+| `type` | `data` | when |
+|---|---|---|
+| `init` | `{stats, blocks: [20 newest], txs: [20 newest]}` | on connect, and after a chain reorganisation |
+| `block` | `{hash, number, timestamp, miner, gas_used, transactions_count}` | each committed block (≤ 50 per commit) |
+| `tx` | `{hash, block_number, from_address, to_address, value, status}` | newest txs of a commit (≤ 20), oldest first |
+| `stats` | as `/stats` | after each commit and every 5 s |
+
+Clients may send `{"type":"ping"}` and get `{"type":"pong"}`. The server
+pings every 20 s and closes connections that are silent for 60 s, block a
+write for 10 s, or fall more than 256 messages behind; reconnecting yields a
+fresh `init`.
+
+## CLOB history
+
+`/api/clob/*` (orders, fills, cancels by trader, pair tape, per-block lists,
+order lookup by hash, archive stats) is documented in
+[CLOB_ARCHIVE.md](CLOB_ARCHIVE.md#api). It needs `CLICKHOUSE_URL`; without it
+these routes answer 503.

@@ -1,0 +1,1069 @@
+//! Explorer REST + WebSocket API. Routes and JSON field names match the old
+//! api-go service so the React UI works unchanged.
+
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use arc_swap::ArcSwap;
+use axum::extract::ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
+use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::middleware;
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Json, Router};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use tokio::sync::broadcast;
+
+use crate::indexer::Sink;
+use crate::rpc::Rpc;
+use crate::store::Store;
+use crate::types::*;
+use crate::Status;
+
+/// Most blocks / txs pushed to WS clients per commit. The UI keeps 50 blocks
+/// and 20 txs, so sending more during catch-up is wasted work.
+const WS_MAX_BLOCKS: usize = 50;
+const WS_MAX_TXS: usize = 20;
+const WS_PING: Duration = Duration::from_secs(20);
+const WS_IDLE: Duration = Duration::from_secs(60);
+const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const RPC_CALL_TIMEOUT: Duration = Duration::from_secs(3);
+const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+
+pub struct Hub {
+    store: Arc<Store>,
+    tx: broadcast::Sender<Utf8Bytes>,
+    /// Latest /stats body, recomputed once per commit and shared by everyone.
+    stats: ArcSwap<Value>,
+}
+
+impl Hub {
+    pub fn new(store: Arc<Store>) -> Arc<Hub> {
+        let (tx, _) = broadcast::channel(256);
+        let h = Arc::new(Hub { store, tx, stats: ArcSwap::from_pointee(Value::Null) });
+        h.refresh_stats();
+        h
+    }
+
+    fn send(&self, v: Value) {
+        // No receivers is fine.
+        let _ = self.tx.send(Utf8Bytes::from(v.to_string()));
+    }
+
+    fn refresh_stats(&self) -> Arc<Value> {
+        let v = Arc::new(compute_stats(&self.store).unwrap_or_else(|e| {
+            tracing::error!(err = %e, "stats");
+            Value::Null
+        }));
+        self.stats.store(v.clone());
+        v
+    }
+
+    pub fn stats(&self) -> Arc<Value> {
+        self.stats.load_full()
+    }
+
+    pub fn init_message(&self) -> anyhow::Result<Value> {
+        let blocks: Vec<Value> = self.store.blocks_desc(None, 20)?.iter().map(block_summary_json).collect();
+        let txs: Vec<Value> = self.store.latest_txs(20)?.iter().map(tx_summary_json).collect();
+        Ok(json!({"type": "init", "data": {"stats": *self.stats(), "blocks": blocks, "txs": txs}}))
+    }
+
+    /// Re-sends stats every few seconds so idle chains still look alive.
+    pub async fn heartbeat(self: Arc<Self>) {
+        let mut t = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            t.tick().await;
+            let s = self.refresh_stats();
+            self.send(json!({"type": "stats", "data": *s}));
+        }
+    }
+}
+
+impl Sink for Hub {
+    fn committed(&self, blocks: &[FullBlock]) {
+        let start = blocks.len().saturating_sub(WS_MAX_BLOCKS);
+        for fb in &blocks[start..] {
+            self.send(json!({"type": "block", "data": block_summary_json(&fb.block)}));
+        }
+        // Oldest first: the UI prepends each tx, leaving the newest on top.
+        let mut recent: Vec<&TxRec> = blocks.iter().rev().flat_map(|b| b.txs.iter().rev()).take(WS_MAX_TXS).collect();
+        recent.reverse();
+        for t in recent {
+            self.send(json!({"type": "tx", "data": tx_summary_json(t)}));
+        }
+        let s = self.refresh_stats();
+        self.send(json!({"type": "stats", "data": *s}));
+    }
+
+    fn reorged(&self, _new_head: Option<Head>) {
+        // Clients may be showing orphaned blocks; give them a fresh snapshot.
+        self.refresh_stats();
+        match self.init_message() {
+            Ok(m) => self.send(m),
+            Err(e) => tracing::error!(err = %e, "reorg init message"),
+        }
+    }
+}
+
+fn compute_stats(store: &Store) -> anyhow::Result<Value> {
+    let c = store.counters()?;
+    let recent = store.blocks_desc(None, 101)?;
+    let head = recent.first();
+    let avg = match (recent.first(), recent.last()) {
+        (Some(a), Some(b)) if a.number > b.number && a.timestamp > b.timestamp => {
+            (a.timestamp - b.timestamp) as f64 / (a.number - b.number) as f64
+        }
+        _ => 0.0,
+    };
+    let last20 = &recent[..recent.len().min(20)];
+    let tps = match (last20.first(), last20.last()) {
+        (Some(a), Some(b)) if a.number > b.number && a.timestamp > b.timestamp => {
+            let bt = (a.timestamp - b.timestamp) as f64 / (a.number - b.number) as f64;
+            a.tx_count as f64 / bt
+        }
+        _ => 0.0,
+    };
+    // Median time from receiving a block to committing it, over recent
+    // blocks (catch-up batches wait longer in the queue and are skipped).
+    let mut lat: Vec<u64> = recent
+        .iter()
+        .take(50)
+        .filter(|b| b.seen_ms > 0 && b.indexed_ms >= b.seen_ms)
+        .map(|b| b.indexed_ms - b.seen_ms)
+        .collect();
+    lat.sort_unstable();
+    let index_ms = lat.get(lat.len() / 2).copied();
+    let tip = crate::metrics::get().tip.load(std::sync::atomic::Ordering::Relaxed);
+    let lag = tip.saturating_sub(head.map_or(0, |b| b.number));
+    Ok(json!({
+        "index_latency_ms": index_ms,
+        "lag_blocks": lag,
+        "total_blocks": c.blocks.to_string(),
+        "block_height": head.map(|b| b.number.to_string()),
+        "latest_block_timestamp": head.map(|b| b.timestamp.to_string()),
+        "total_transactions": c.txs.to_string(),
+        "total_addresses": c.addresses.to_string(),
+        "total_logs": c.logs.to_string(),
+        "avg_block_time": format!("{avg:.3}"),
+        "tps": format!("{tps:.2}"),
+    }))
+}
+
+// ---- JSON shapes ----
+
+fn opt_dec(v: &Option<Vec<u8>>) -> Value {
+    v.as_ref().map(|b| Value::String(dec(b))).unwrap_or(Value::Null)
+}
+
+fn block_summary_json(b: &BlockRec) -> Value {
+    json!({
+        "hash": hex0x(&b.hash),
+        "number": b.number,
+        "timestamp": b.timestamp,
+        "miner": hex0x(&b.miner),
+        "gas_used": b.gas_used,
+        "gas_limit": b.gas_limit,
+        "transactions_count": b.tx_count,
+        "seen_ms": b.seen_ms,
+        "indexed_ms": b.indexed_ms,
+    })
+}
+
+fn block_json(b: &BlockRec) -> Value {
+    json!({
+        "hash": hex0x(&b.hash),
+        "number": b.number,
+        "timestamp": b.timestamp,
+        "miner": hex0x(&b.miner),
+        "gas_used": b.gas_used,
+        "gas_limit": b.gas_limit,
+        "base_fee_per_gas": opt_dec(&b.base_fee),
+        "difficulty": dec(&b.difficulty),
+        "total_difficulty": Value::Null,
+        "transactions_count": b.tx_count,
+        "logs_count": b.log_count,
+        "parent_hash": hex0x(&b.parent_hash),
+        "state_root": hex0x(&b.state_root),
+        "transactions_root": hex0x(&b.transactions_root),
+        "receipts_root": hex0x(&b.receipts_root),
+        "size": b.size,
+        "seen_ms": b.seen_ms,
+        "indexed_ms": b.indexed_ms,
+    })
+}
+
+fn tx_summary_json(t: &TxRec) -> Value {
+    json!({
+        "hash": hex0x(&t.hash),
+        "block_number": t.block_number,
+        "from_address": hex0x(&t.from),
+        "to_address": t.to.map(|a| hex0x(&a)),
+        "value": dec(&t.value),
+        "status": t.status,
+        // 4-byte selector; "" for a plain transfer, "create" for deployments.
+        "method": if t.to.is_none() { "create".to_string() } else if t.input.len() >= 4 { hex0x(&t.input[..4]) } else { String::new() },
+    })
+}
+
+fn tx_json(t: &TxRec) -> Value {
+    json!({
+        "hash": hex0x(&t.hash),
+        "block_number": t.block_number,
+        "block_timestamp": t.block_timestamp,
+        "transaction_index": t.index,
+        "from_address": hex0x(&t.from),
+        "to_address": t.to.map(|a| hex0x(&a)),
+        "value": dec(&t.value),
+        "gas": t.gas,
+        // What the sender actually paid per gas; falls back to the tx's own
+        // gasPrice when the node has no effectiveGasPrice.
+        "gas_price": t.effective_gas_price.as_ref().map(|b| dec(b)).unwrap_or_else(|| dec(&t.gas_price)),
+        "effective_gas_price": opt_dec(&t.effective_gas_price),
+        "max_fee_per_gas": opt_dec(&t.max_fee_per_gas),
+        "max_priority_fee_per_gas": opt_dec(&t.max_priority_fee_per_gas),
+        "gas_used": t.gas_used,
+        "nonce": t.nonce,
+        "input_data": hex0x(&t.input),
+        "status": t.status,
+        "contract_address": t.contract_address.map(|a| hex0x(&a)),
+        "logs_count": t.log_count,
+        "transaction_type": t.tx_type,
+    })
+}
+
+/// RFC 3339 UTC from unix seconds (days-from-civil, no date crate needed).
+fn iso(ts: u64) -> String {
+    let days = (ts / 86400) as i64;
+    let secs = ts % 86400;
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", secs / 3600, secs / 60 % 60, secs % 60)
+}
+
+// ---- HTTP ----
+
+#[derive(Clone)]
+pub struct AppState {
+    pub store: Arc<Store>,
+    pub rpc: Arc<Rpc>,
+    pub hub: Arc<Hub>,
+    pub status: Arc<Status>,
+    pub ready_max_lag: u64,
+    /// Blocks this far below the head can no longer change (REORG_DEPTH).
+    pub final_depth: u64,
+    pub clob: Option<Arc<crate::clob::Clob>>,
+    pub node_cache: Arc<NodeCache>,
+    pub max_ws_clients: usize,
+    /// None when contract verification is disabled (VERIFIER_ENABLED=false).
+    pub verifier: Option<Arc<crate::verify::Verifier>>,
+}
+
+/// Short-lived cache of node reads (balance, code) so hot address pages do
+/// not hit the node on every request.
+#[derive(Default)]
+pub struct NodeCache {
+    map: std::sync::Mutex<std::collections::HashMap<(u8, Addr), (Instant, Arc<Vec<u8>>)>>,
+}
+
+const BALANCE_TTL: Duration = Duration::from_secs(2);
+const CODE_TTL: Duration = Duration::from_secs(60);
+const NODE_CACHE_MAX: usize = 100_000;
+
+impl NodeCache {
+    fn get(&self, kind: u8, a: &Addr, ttl: Duration) -> Option<Arc<Vec<u8>>> {
+        let m = self.map.lock().unwrap();
+        m.get(&(kind, *a)).filter(|(t, _)| t.elapsed() < ttl).map(|(_, v)| v.clone())
+    }
+
+    fn put(&self, kind: u8, a: &Addr, v: Vec<u8>) -> Arc<Vec<u8>> {
+        let v = Arc::new(v);
+        let mut m = self.map.lock().unwrap();
+        if m.len() >= NODE_CACHE_MAX {
+            m.clear();
+        }
+        m.insert((kind, *a), (Instant::now(), v.clone()));
+        v
+    }
+}
+
+/// Balance (kind 0) or code (kind 1) of `a`, cached; None if the node fails
+/// or is slower than RPC_CALL_TIMEOUT.
+async fn node_read(s: &AppState, kind: u8, a: Addr) -> Option<Arc<Vec<u8>>> {
+    let ttl = if kind == 0 { BALANCE_TTL } else { CODE_TTL };
+    if let Some(v) = s.node_cache.get(kind, &a, ttl) {
+        return Some(v);
+    }
+    let addr = hex0x(&a);
+    let r = if kind == 0 {
+        tokio::time::timeout(RPC_CALL_TIMEOUT, s.rpc.balance(&addr)).await
+    } else {
+        tokio::time::timeout(RPC_CALL_TIMEOUT, s.rpc.code(&addr)).await
+    };
+    match r {
+        Ok(Ok(v)) => Some(s.node_cache.put(kind, &a, v)),
+        _ => None,
+    }
+}
+
+/// Cache-Control for data about block `n`: long-lived once it is final.
+fn cache_header(s: &AppState, n: u64) -> HeaderValue {
+    let head = s.status.head.load(Ordering::Relaxed);
+    if head >= s.final_depth && n <= head - s.final_depth {
+        HeaderValue::from_static("public, max-age=86400, immutable")
+    } else {
+        HeaderValue::from_static("no-cache")
+    }
+}
+
+fn with_cache(h: HeaderValue, v: Value) -> Response {
+    let mut r = Json(v).into_response();
+    r.headers_mut().insert(header::CACHE_CONTROL, h);
+    r
+}
+
+/// Cursor "block:index" of the last item, for `before=`.
+fn cursor_of(t: &TxRec) -> String {
+    format!("{}:{}", t.block_number, t.index)
+}
+
+fn parse_cursor(c: &str) -> Option<(u64, u32)> {
+    let (n, i) = c.split_once(':')?;
+    Some((n.parse().ok()?, i.parse().ok()?))
+}
+
+pub enum ApiError {
+    NotFound(&'static str),
+    BadRequest(&'static str),
+    Internal(anyhow::Error),
+}
+
+impl<E: Into<anyhow::Error>> From<E> for ApiError {
+    fn from(e: E) -> Self {
+        ApiError::Internal(e.into())
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let (code, msg) = match self {
+            ApiError::NotFound(m) => (StatusCode::NOT_FOUND, m),
+            ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
+            ApiError::Internal(e) => {
+                tracing::error!(err = %e, "request failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (code, Json(json!({"error": msg}))).into_response()
+    }
+}
+
+type ApiResult = Result<Json<Value>, ApiError>;
+
+#[derive(Deserialize)]
+pub struct ListQ {
+    limit: Option<usize>,
+    page: Option<usize>,
+    offset: Option<usize>,
+    pattern: Option<String>,
+    /// Keyset cursor "block:index": return items strictly older than it.
+    before: Option<String>,
+}
+
+fn limit_or(q: &ListQ, def: usize, max: usize) -> usize {
+    match q.limit {
+        Some(l) if l > 0 && l <= max => l,
+        _ => def,
+    }
+}
+
+pub fn router(state: AppState, limiter: Arc<crate::guard::Limiter>) -> Router {
+    Router::new()
+        .route("/", get(root))
+        .route("/ws", get(root))
+        .route("/health", get(health))
+        .route("/ready", get(ready))
+        .route("/stats", get(stats))
+        .route("/api/blocks", get(blocks_list))
+        .route("/api/blocks/range/{start}/{end}", get(blocks_range))
+        .route("/api/blocks/{id}", get(block_detail))
+        .route("/api/blocks/{id}/transactions", get(block_txs))
+        .route("/api/transactions", get(txs_list))
+        .route("/api/transactions/pending/list", get(|| async { Json(json!([])) }))
+        .route("/api/transactions/address/{addr}", get(txs_by_address))
+        .route("/api/transactions/{hash}", get(tx_detail))
+        .route("/api/addresses", get(addresses_list))
+        .route("/api/addresses/search/by-pattern", get(addresses_search))
+        .route("/api/addresses/{addr}", get(address_detail))
+        .route("/api", get(crate::etherscan::handler).post(crate::etherscan::post_handler))
+        .route("/api/contracts/{addr}", get(contract_detail))
+        .route("/api/contracts/{addr}/verify", axum::routing::post(contract_verify))
+        .route("/api/config", get(ui_config))
+        .route("/api/tokens", get(tokens_list))
+        .route("/api/tokens/{addr}", get(token_detail))
+        .route("/api/tokens/{addr}/transfers", get(token_transfers))
+        .route("/api/tokens/{addr}/holders", get(token_holders))
+        .route("/api/addresses/{addr}/token-transfers", get(address_token_transfers))
+        .route("/api/addresses/{addr}/tokens", get(address_tokens))
+        .route("/api/addresses/{addr}/internal", get(address_internals))
+        .route("/api/search", get(search))
+        .route("/api/clob/stats", get(crate::clob::stats))
+        .route("/api/clob/orders/{hash}", get(crate::clob::item_by_hash))
+        .route("/api/clob/traders/{addr}/{kind}", get(crate::clob::trader_list))
+        .route("/api/clob/pairs/{pair}/trades", get(crate::clob::pair_trades))
+        .route("/api/clob/blocks/{height}", get(crate::clob::block))
+        .route("/api/clob/{*rest}", get(crate::clob::unknown))
+        // After routing, so metrics see the route template; the WebSocket
+        // upgrade answers immediately, so the timeout does not cut sockets.
+        .route_layer(middleware::from_fn_with_state(limiter, crate::guard::guard))
+        // Standard-JSON verification input can be large.
+        .layer(axum::extract::DefaultBodyLimit::max(25 << 20))
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(StatusCode::GATEWAY_TIMEOUT, HTTP_TIMEOUT))
+        .fallback(|| async { (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))) })
+        .with_state(state)
+}
+
+async fn health(State(s): State<AppState>) -> Json<Value> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    Json(json!({
+        "status": "ok",
+        "timestamp": iso(now),
+        "connectedClients": s.status.clients.load(Ordering::Relaxed),
+    }))
+}
+
+/// 200 once the indexer is within READY_MAX_LAG blocks of the node.
+async fn ready(State(s): State<AppState>) -> Response {
+    let tip = s.status.tip.load(Ordering::Relaxed);
+    let head = s.status.head.load(Ordering::Relaxed);
+    let lag = tip.saturating_sub(head);
+    let ok = tip > 0 && lag <= s.ready_max_lag;
+    let code = if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    (code, Json(json!({"ready": ok, "head": head, "tip": tip, "lag": lag}))).into_response()
+}
+
+/// Which optional features this deployment has, so the UI hides the rest.
+async fn ui_config(State(s): State<AppState>) -> Json<Value> {
+    Json(json!({"clob": s.clob.is_some(), "verifier": s.verifier.is_some()}))
+}
+
+async fn stats(State(s): State<AppState>) -> Json<Value> {
+    Json((*s.hub.stats()).clone())
+}
+
+async fn blocks_list(State(s): State<AppState>, Query(q): Query<ListQ>) -> ApiResult {
+    let l = limit_or(&q, 20, 100);
+    Ok(Json(Value::Array(s.store.blocks_desc(None, l)?.iter().map(block_json).collect())))
+}
+
+async fn blocks_range(State(s): State<AppState>, Path((start, end)): Path<(u64, u64)>) -> ApiResult {
+    if start > end || end - start > 1000 {
+        return Err(ApiError::BadRequest("Invalid range"));
+    }
+    Ok(Json(Value::Array(s.store.blocks_range(start, end)?.iter().map(block_json).collect())))
+}
+
+/// Most transactions inlined in a block page; the rest via
+/// /api/blocks/{id}/transactions.
+const BLOCK_TXS_INLINE: usize = 500;
+
+fn find_block(s: &AppState, id: &str) -> Result<BlockRec, ApiError> {
+    let b = if id.starts_with("0x") {
+        let h = parse_fixed::<32>(&id).ok_or(ApiError::BadRequest("Invalid block hash"))?;
+        s.store.block_by_hash(&h)?
+    } else {
+        let n: u64 = id.parse().map_err(|_| ApiError::BadRequest("Invalid block number"))?;
+        s.store.block(n)?
+    };
+    b.ok_or(ApiError::NotFound("Block not found"))
+}
+
+async fn block_detail(State(s): State<AppState>, Path(id): Path<String>) -> Result<Response, ApiError> {
+    let b = find_block(&s, &id)?;
+    let mut v = block_json(&b);
+    let txs = s.store.block_txs_page(b.number, 0, BLOCK_TXS_INLINE)?;
+    v["transactions"] = Value::Array(txs.iter().map(tx_json).collect());
+    v["transactions_truncated"] = Value::Bool((b.tx_count as usize) > BLOCK_TXS_INLINE);
+    Ok(with_cache(cache_header(&s, b.number), v))
+}
+
+async fn block_txs(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<ListQ>,
+) -> Result<Response, ApiError> {
+    let b = find_block(&s, &id)?;
+    let limit = limit_or(&q, 100, 1000);
+    let offset = q.offset.unwrap_or(0);
+    let txs = s.store.block_txs_page(b.number, offset, limit)?;
+    let v = json!({
+        "block_number": b.number,
+        "total": b.tx_count,
+        "offset": offset,
+        "limit": limit,
+        "transactions": txs.iter().map(tx_json).collect::<Vec<_>>(),
+    });
+    Ok(with_cache(cache_header(&s, b.number), v))
+}
+
+async fn txs_list(State(s): State<AppState>, Query(q): Query<ListQ>) -> ApiResult {
+    let l = limit_or(&q, 20, 100);
+    Ok(Json(Value::Array(s.store.latest_txs(l)?.iter().map(tx_json).collect())))
+}
+
+async fn txs_by_address(State(s): State<AppState>, Path(addr): Path<String>, Query(q): Query<ListQ>) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    let l = limit_or(&q, 20, 100);
+    let before = match q.before.as_deref() {
+        Some(c) => Some(parse_cursor(c).ok_or(ApiError::BadRequest("Invalid cursor"))?),
+        None => None,
+    };
+    Ok(Json(Value::Array(s.store.addr_txs_before(&a, before, l)?.iter().map(tx_json).collect())))
+}
+
+async fn tx_detail(State(s): State<AppState>, Path(hash): Path<String>) -> Result<Response, ApiError> {
+    let started = Instant::now();
+    let h = parse_fixed::<32>(&hash).ok_or(ApiError::BadRequest("Invalid transaction hash"))?;
+    let t = s.store.tx_by_hash(&h)?.ok_or(ApiError::NotFound("Transaction not found"))?;
+    let mut v = tx_json(&t);
+    if let Some(b) = s.store.block(t.block_number)? {
+        v["block_hash"] = Value::String(hex0x(&b.hash));
+        v["block_seen_ms"] = json!(b.seen_ms);
+        v["block_indexed_ms"] = json!(b.indexed_ms);
+    }
+    let abi_of = |a: &Addr| s.verifier.as_ref().and_then(|v| v.abi(&s.store, a));
+    if let Some(abi) = t.to.as_ref().and_then(abi_of) {
+        v["decoded_input"] = json!(crate::verify::decode_input(&abi, &t.input));
+    }
+    let logs: Vec<Value> = s
+        .store
+        .tx_logs(&t)?
+        .iter()
+        .map(|(i, l)| {
+            let decoded = abi_of(&l.address).and_then(|abi| crate::verify::decode_log(&abi, &l.topics, &l.data));
+            json!({
+                "log_index": i,
+                "address": hex0x(&l.address),
+                "topics": l.topics.iter().map(|t| hex0x(t)).collect::<Vec<_>>(),
+                "data": hex0x(&l.data),
+                "decoded": decoded,
+            })
+        })
+        .collect();
+    v["logs"] = Value::Array(logs);
+    v["internal_transactions"] =
+        Value::Array(s.store.tx_internals(&t)?.iter().map(|c| internal_json(None, c)).collect());
+    let mut ctx = TokenCtx::default();
+    let tts = s.store.tx_transfers(&t)?;
+    v["token_transfers"] =
+        Value::Array(tts.iter().map(|tr| transfer_json(&s, &mut ctx, t.block_number, tr)).collect::<Result<_, _>>()?);
+    v["served_us"] = json!(started.elapsed().as_micros() as u64);
+    Ok(with_cache(cache_header(&s, t.block_number), v))
+}
+
+/// Addresses by transaction count, highest first.
+async fn addresses_list(State(s): State<AppState>, Query(q): Query<ListQ>) -> ApiResult {
+    let l = limit_or(&q, 20, 100);
+    let rows = s.store.top_addrs(q.offset.unwrap_or(0).min(100_000), l)?;
+    Ok(Json(Value::Array(
+        rows.iter()
+            .map(|(a, i)| {
+                json!({"address": hex0x(a), "transaction_count": i.tx_count, "first_seen": iso(i.first_ts),
+                       "last_seen": iso(i.last_ts), "is_contract": i.is_contract})
+            })
+            .collect(),
+    )))
+}
+
+async fn addresses_search(State(s): State<AppState>, Query(q): Query<ListQ>) -> ApiResult {
+    let p = q.pattern.as_deref().unwrap_or("").to_ascii_lowercase();
+    let p = p.strip_prefix("0x").unwrap_or(&p);
+    if p.len() < 3 || p.len() > 40 || !p.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ApiError::BadRequest("Pattern must be at least 3 hex characters"));
+    }
+    let rows = s.store.addrs_with_prefix(p, 20)?;
+    Ok(Json(Value::Array(
+        rows.iter()
+            .map(|(a, i)| json!({"address": hex0x(a), "transaction_count": i.tx_count, "last_seen": iso(i.last_ts)}))
+            .collect(),
+    )))
+}
+
+async fn address_detail(State(s): State<AppState>, Path(addr): Path<String>, Query(q): Query<ListQ>) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    let addr = hex0x(&a);
+    let page = q.page.filter(|p| *p >= 1).unwrap_or(1);
+    let limit = limit_or(&q, 25, 50);
+    // Node calls run concurrently with the store reads, are cached briefly
+    // and bounded, so a slow node degrades the balance/code fields instead
+    // of the whole page.
+    let s2 = s.clone();
+    let balance = tokio::spawn(async move { node_read(&s2, 0, a).await });
+    let s2 = s.clone();
+    let code = tokio::spawn(async move { node_read(&s2, 1, a).await });
+
+    let info = s.store.addr_info(&a)?;
+    // `before` (keyset) costs the same at any depth; `page` skips entries.
+    let txs = match q.before.as_deref() {
+        Some(c) => {
+            s.store.addr_txs_before(&a, Some(parse_cursor(c).ok_or(ApiError::BadRequest("Invalid cursor"))?), limit)?
+        }
+        None => s.store.addr_txs(&a, (page - 1).saturating_mul(limit), limit)?,
+    };
+    let next_cursor = if txs.len() == limit { txs.last().map(cursor_of) } else { None };
+    let txs: Vec<Value> = txs.iter().map(tx_json).collect();
+    let deploy = match info.and_then(|i| i.creator) {
+        Some((n, i)) => s.store.tx(n, i)?.map(|t| {
+            json!({"hash": hex0x(&t.hash), "block_number": t.block_number,
+                   "block_timestamp": t.block_timestamp, "from_address": hex0x(&t.from)})
+        }),
+        None => None,
+    };
+    let balance = match balance.await {
+        Ok(Some(b)) => Value::String(dec(&b)),
+        _ => Value::Null,
+    };
+    let code: Arc<Vec<u8>> = match code.await {
+        Ok(Some(c)) => c,
+        _ => Arc::new(Vec::new()),
+    };
+    let i = info.unwrap_or_default();
+    Ok(Json(json!({
+        "address": addr,
+        "transaction_count": i.tx_count,
+        "first_seen": info.map(|i| iso(i.first_ts)),
+        "last_seen": info.map(|i| iso(i.last_ts)),
+        "is_contract": i.is_contract || !code.is_empty(),
+        "bytecode_size": code.len(),
+        "bytecode": if code.is_empty() { Value::Null } else { Value::String(hex0x(&code)) },
+        "deploy_info": deploy,
+        "balance": balance,
+        "transactions": txs,
+        "total_transactions": i.tx_count,
+        "page": page,
+        "limit": limit,
+        "next_cursor": next_cursor,
+        "verified": s.store.contract(&a)?.map(|c| json!({"name": c.name, "match_type": c.match_type, "compiler": c.compiler})),
+    })))
+}
+
+// ---- contract verification ----
+
+async fn contract_detail(State(s): State<AppState>, Path(addr): Path<String>) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    let c = s.store.contract(&a)?.ok_or(ApiError::NotFound("Contract is not verified"))?;
+    Ok(Json(json!({
+        "address": hex0x(&a),
+        "name": c.name,
+        "file": c.file,
+        "compiler": c.compiler,
+        "match_type": c.match_type,
+        "abi": serde_json::from_str::<Value>(&c.abi).unwrap_or(Value::Null),
+        "sources": c.sources,
+        "settings": c.settings,
+        "constructor_args": c.constructor_args,
+        "verified_at": iso(c.verified_at),
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct VerifyReq {
+    compiler_version: String,
+    contract_name: String,
+    /// Solidity standard-JSON input (object, or the same as a string).
+    standard_json: Value,
+    #[serde(default)]
+    constructor_args: String,
+}
+
+/// Runs a verification and stores the result; shared with the Etherscan API.
+pub async fn run_verification(
+    s: &AppState,
+    a: Addr,
+    compiler: &str,
+    contract: &str,
+    input: Value,
+    args: &str,
+) -> Result<crate::verify::ContractRecord, String> {
+    let v = s.verifier.clone().ok_or("contract verification is disabled")?;
+    let input = match input {
+        Value::String(t) => serde_json::from_str(&t).map_err(|_| "standard_json is not valid JSON".to_string())?,
+        other => other,
+    };
+    let code = match tokio::time::timeout(Duration::from_secs(10), s.rpc.code(&hex0x(&a))).await {
+        Ok(Ok(c)) => c,
+        _ => return Err("could not read the contract code from the node".into()),
+    };
+    // The deploying tx's input, when the contract was created by an EOA tx.
+    let creation = s
+        .store
+        .addr_info(&a)
+        .ok()
+        .flatten()
+        .and_then(|i| i.creator)
+        .and_then(|(n, i)| s.store.tx(n, i).ok().flatten())
+        .filter(|t| t.contract_address == Some(a))
+        .map(|t| t.input);
+    let rec = v.verify(&code, creation.as_deref(), compiler, contract, input, args).await.map_err(|e| e.to_string())?;
+    s.store.put_contract(&a, &rec).map_err(|e| {
+        tracing::error!(err = %e, "store contract");
+        "internal error".to_string()
+    })?;
+    v.forget(&a);
+    tracing::info!(address = %hex0x(&a), name = %rec.name, match_type = %rec.match_type, "contract verified");
+    Ok(rec)
+}
+
+async fn contract_verify(State(s): State<AppState>, Path(addr): Path<String>, Json(req): Json<VerifyReq>) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    match run_verification(&s, a, &req.compiler_version, &req.contract_name, req.standard_json, &req.constructor_args)
+        .await
+    {
+        Ok(r) => Ok(Json(json!({"status": "verified", "name": r.name, "match_type": r.match_type}))),
+        Err(e) => Ok(Json(json!({"status": "failed", "error": e}))),
+    }
+}
+
+// ---- internal transactions ----
+
+pub fn internal_json(ctx: Option<(u64, &H256, u64)>, c: &InternalTx) -> Value {
+    let mut v = json!({
+        "transaction_index": c.tx_index,
+        "trace_index": c.trace_index,
+        "depth": c.depth,
+        "type": c.call_type,
+        "from_address": hex0x(&c.from),
+        "to_address": c.to.map(|a| hex0x(&a)),
+        "value": dec(&c.value),
+        "gas": c.gas,
+        "gas_used": c.gas_used,
+        "error": c.error,
+    });
+    if let Some((n, h, ts)) = ctx {
+        v["block_number"] = json!(n);
+        v["block_timestamp"] = json!(ts);
+        v["transaction_hash"] = json!(hex0x(h));
+        v["cursor"] = json!(format!("{n}:{}:{}", c.tx_index, c.trace_index));
+    }
+    v
+}
+
+async fn address_internals(State(s): State<AppState>, Path(addr): Path<String>, Query(q): Query<ListQ>) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    let limit = limit_or(&q, 25, 100);
+    let before = match q.before.as_deref() {
+        Some(c) => {
+            let p: Vec<&str> = c.split(':').collect();
+            let parsed =
+                (p.len() == 3).then(|| Some((p[0].parse().ok()?, p[1].parse().ok()?, p[2].parse().ok()?))).flatten();
+            Some(parsed.ok_or(ApiError::BadRequest("Invalid cursor"))?)
+        }
+        None => None,
+    };
+    let rows = s.store.addr_internals(&a, before, limit)?;
+    let mut ts: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+    let mut items = Vec::with_capacity(rows.len());
+    for (n, h, c) in &rows {
+        if !ts.contains_key(n) {
+            ts.insert(*n, s.store.block(*n)?.map_or(0, |b| b.timestamp));
+        }
+        items.push(internal_json(Some((*n, h, ts[n])), c));
+    }
+    let next = if items.len() == limit { items.last().map(|v| v["cursor"].clone()) } else { None };
+    Ok(Json(json!({"items": items, "next_cursor": next})))
+}
+
+// ---- tokens ----
+
+fn kind_name(k: u8) -> &'static str {
+    match k {
+        crate::tokens::KIND_ERC20 => "ERC-20",
+        crate::tokens::KIND_ERC721 => "ERC-721",
+        crate::tokens::KIND_ERC1155 => "ERC-1155",
+        _ => "unknown",
+    }
+}
+
+fn token_json(a: &Addr, st: &crate::store::TokenStats, m: &crate::store::TokenMeta) -> Value {
+    json!({
+        "address": hex0x(a),
+        "type": kind_name(st.kind),
+        "name": m.name,
+        "symbol": m.symbol,
+        "decimals": m.decimals,
+        "holders": st.holders,
+        "transfers": st.transfers,
+        "first_block": st.first_block,
+    })
+}
+
+/// Per-request caches of token metadata and block timestamps.
+#[derive(Default)]
+struct TokenCtx {
+    meta: std::collections::HashMap<Addr, Option<(crate::store::TokenStats, crate::store::TokenMeta)>>,
+    ts: std::collections::HashMap<u64, u64>,
+}
+
+fn transfer_json(s: &AppState, ctx: &mut TokenCtx, n: u64, t: &crate::tokens::Transfer) -> Result<Value, ApiError> {
+    if !ctx.meta.contains_key(&t.token) {
+        ctx.meta.insert(t.token, s.store.token(&t.token)?);
+    }
+    if !ctx.ts.contains_key(&n) {
+        ctx.ts.insert(n, s.store.block(n)?.map_or(0, |b| b.timestamp));
+    }
+    let tx_hash = s.store.tx(n, t.tx_index)?.map(|x| hex0x(&x.hash));
+    let m = ctx.meta[&t.token].as_ref().map(|(_, m)| m.clone()).unwrap_or_default();
+    Ok(json!({
+        "block_number": n,
+        "block_timestamp": ctx.ts[&n],
+        "transaction_hash": tx_hash,
+        "log_index": t.log_index,
+        "batch_index": t.sub,
+        "token": hex0x(&t.token),
+        "token_type": kind_name(t.kind),
+        "token_symbol": m.symbol,
+        "token_decimals": m.decimals,
+        "from_address": hex0x(&t.from),
+        "to_address": hex0x(&t.to),
+        "token_id": t.token_id.as_ref().map(|i| dec(i)),
+        "value": dec(&t.value),
+        "cursor": format!("{n}:{}:{}", t.log_index, t.sub),
+    }))
+}
+
+fn parse_tt_cursor(c: &Option<String>) -> Result<Option<(u64, u32, u16)>, ApiError> {
+    let Some(c) = c.as_deref() else { return Ok(None) };
+    let mut it = c.split(':');
+    let r = (|| Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next().unwrap_or("0").parse().ok()?)))();
+    r.map(Some).ok_or(ApiError::BadRequest("Invalid cursor"))
+}
+
+fn transfers_page(s: &AppState, a: &Addr, by_token: bool, q: &ListQ) -> ApiResult {
+    let limit = limit_or(q, 25, 100);
+    let rows = s.store.transfers_by(a, by_token, parse_tt_cursor(&q.before)?, limit)?;
+    let mut ctx = TokenCtx::default();
+    let items: Vec<Value> = rows.iter().map(|(n, t)| transfer_json(s, &mut ctx, *n, t)).collect::<Result<_, _>>()?;
+    let next = if items.len() == limit { items.last().map(|v| v["cursor"].clone()) } else { None };
+    Ok(Json(json!({"items": items, "next_cursor": next})))
+}
+
+async fn tokens_list(State(s): State<AppState>, Query(q): Query<ListQ>) -> ApiResult {
+    let l = limit_or(&q, 50, 100);
+    let rows = s.store.top_tokens(q.offset.unwrap_or(0).min(100_000), l)?;
+    Ok(Json(Value::Array(rows.iter().map(|(a, st, m)| token_json(a, st, m)).collect())))
+}
+
+async fn token_detail(State(s): State<AppState>, Path(addr): Path<String>) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    let (st, m) = s.store.token(&a)?.ok_or(ApiError::NotFound("Token not found"))?;
+    Ok(Json(token_json(&a, &st, &m)))
+}
+
+async fn token_transfers(State(s): State<AppState>, Path(addr): Path<String>, Query(q): Query<ListQ>) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    transfers_page(&s, &a, true, &q)
+}
+
+async fn address_token_transfers(
+    State(s): State<AppState>,
+    Path(addr): Path<String>,
+    Query(q): Query<ListQ>,
+) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    transfers_page(&s, &a, false, &q)
+}
+
+async fn token_holders(State(s): State<AppState>, Path(addr): Path<String>, Query(q): Query<ListQ>) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    let l = limit_or(&q, 50, 100);
+    let rows = s.store.token_holders(&a, q.offset.unwrap_or(0).min(100_000), l)?;
+    Ok(Json(Value::Array(rows.iter().map(|(h, v)| json!({"address": hex0x(h), "value": dec(v)})).collect())))
+}
+
+async fn address_tokens(State(s): State<AppState>, Path(addr): Path<String>) -> ApiResult {
+    let a = parse_fixed::<20>(&addr).ok_or(ApiError::BadRequest("Invalid address"))?;
+    let rows = s.store.holder_tokens(&a, 500)?;
+    let mut ctx = TokenCtx::default();
+    let mut out = Vec::with_capacity(rows.len());
+    for (tok, id, v) in rows {
+        if !ctx.meta.contains_key(&tok) {
+            ctx.meta.insert(tok, s.store.token(&tok)?);
+        }
+        let Some((st, m)) = &ctx.meta[&tok] else { continue };
+        let mut j = token_json(&tok, st, m);
+        j["token_id"] = json!(id.as_ref().map(|i| dec(i)));
+        j["value"] = json!(dec(&v));
+        out.push(j);
+    }
+    Ok(Json(Value::Array(out)))
+}
+
+#[derive(Deserialize)]
+pub struct SearchQ {
+    q: Option<String>,
+}
+
+/// Resolves a query to what it names: block number, tx / block hash,
+/// address (token or account), or token name / symbol prefix.
+async fn search(State(s): State<AppState>, Query(q): Query<SearchQ>) -> ApiResult {
+    let q = q.q.unwrap_or_default();
+    let q = q.trim();
+    let mut out: Vec<Value> = Vec::new();
+    if !q.is_empty() && q.len() <= 80 {
+        if let Ok(n) = q.parse::<u64>() {
+            if s.store.block(n)?.is_some() {
+                out.push(json!({"type": "block", "value": n.to_string()}));
+            }
+        } else if let Some(h) = parse_fixed::<32>(q) {
+            if s.store.tx_by_hash(&h)?.is_some() {
+                out.push(json!({"type": "transaction", "value": hex0x(&h)}));
+            }
+            if let Some(b) = s.store.block_by_hash(&h)? {
+                out.push(json!({"type": "block", "value": b.number.to_string()}));
+            }
+        } else if let Some(a) = parse_fixed::<20>(q) {
+            let t = if s.store.token(&a)?.is_some() { "token" } else { "address" };
+            out.push(json!({"type": t, "value": hex0x(&a)}));
+        } else if q.len() >= 2 {
+            for a in s.store.search_tokens(q, 10)? {
+                if let Some((st, m)) = s.store.token(&a)? {
+                    let mut j = token_json(&a, &st, &m);
+                    j["token_type"] = j["type"].take();
+                    j["type"] = json!("token");
+                    j["value"] = json!(hex0x(&a));
+                    out.push(j);
+                }
+            }
+        }
+    }
+    Ok(Json(Value::Array(out)))
+}
+
+// ---- admin (internal listener) ----
+
+/// Metrics and operations, served on ADMIN_ADDR (keep it off the public
+/// network).
+pub fn admin_router(store: Arc<Store>, backup_dir: std::path::PathBuf) -> Router {
+    Router::new()
+        .route(
+            "/metrics",
+            get(|| async { ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], crate::metrics::get().render()) }),
+        )
+        .route(
+            "/admin/checkpoint",
+            axum::routing::post(move || {
+                let (store, dir) = (store.clone(), backup_dir.clone());
+                async move {
+                    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                    let path = dir.join(format!("checkpoint-{now}"));
+                    let p2 = path.clone();
+                    match tokio::task::spawn_blocking(move || store.checkpoint(&p2)).await {
+                        Ok(Ok(head)) => {
+                            Json(json!({"path": path.display().to_string(), "head": head.map(|h| h.number)}))
+                                .into_response()
+                        }
+                        Ok(Err(e)) => ApiError::Internal(e).into_response(),
+                        Err(e) => ApiError::Internal(e.into()).into_response(),
+                    }
+                }
+            }),
+        )
+}
+
+// ---- WebSocket ----
+
+async fn root(
+    State(s): State<AppState>,
+    ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
+) -> Response {
+    match ws {
+        Ok(_) if s.status.clients.load(Ordering::Relaxed) >= s.max_ws_clients => {
+            (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "too many WebSocket clients"}))).into_response()
+        }
+        Ok(ws) => ws.on_upgrade(move |sock| client(s, sock)),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// One task per client owns the socket, so writes never race. A client that
+/// falls behind the broadcast buffer, stops answering pings, or blocks a
+/// write is disconnected; the UI reconnects and gets a fresh init.
+async fn client(s: AppState, mut sock: WebSocket) {
+    s.status.clients.fetch_add(1, Ordering::Relaxed);
+    crate::metrics::get().ws_clients.fetch_add(1, Ordering::Relaxed);
+    let mut rx = s.hub.tx.subscribe();
+    let reason = 'conn: {
+        match s.hub.init_message() {
+            Ok(m) => {
+                if !send(&mut sock, Utf8Bytes::from(m.to_string())).await {
+                    break 'conn "init write failed";
+                }
+            }
+            Err(e) => {
+                tracing::error!(err = %e, "ws init");
+                break 'conn "init failed";
+            }
+        }
+        let mut ping = tokio::time::interval(WS_PING);
+        ping.tick().await;
+        let mut last_seen = Instant::now();
+        loop {
+            tokio::select! {
+                m = rx.recv() => match m {
+                    Ok(m) => if !send(&mut sock, m).await { break 'conn "write failed" },
+                    Err(broadcast::error::RecvError::Lagged(_)) => break 'conn "slow client",
+                    Err(broadcast::error::RecvError::Closed) => break 'conn "shutdown",
+                },
+                _ = ping.tick() => {
+                    if last_seen.elapsed() > WS_IDLE {
+                        break 'conn "idle";
+                    }
+                    let ok = tokio::time::timeout(WS_WRITE_TIMEOUT, sock.send(Message::Ping(Default::default()))).await;
+                    if !matches!(ok, Ok(Ok(()))) { break 'conn "ping failed" }
+                }
+                m = sock.recv() => match m {
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break 'conn "closed",
+                    Some(Ok(Message::Text(t))) => {
+                        last_seen = Instant::now();
+                        if serde_json::from_str::<Value>(&t).ok().and_then(|v| v.get("type").cloned()) == Some(json!("ping")) {
+                            if !send(&mut sock, Utf8Bytes::from_static(r#"{"type":"pong"}"#)).await { break 'conn "write failed" }
+                        }
+                    }
+                    Some(Ok(_)) => last_seen = Instant::now(),
+                },
+            }
+        }
+    };
+    tracing::debug!(reason, "ws client gone");
+    if reason == "slow client" {
+        crate::metrics::get().ws_dropped_slow.fetch_add(1, Ordering::Relaxed);
+    }
+    crate::metrics::get().ws_clients.fetch_sub(1, Ordering::Relaxed);
+    s.status.clients.fetch_sub(1, Ordering::Relaxed);
+}
+
+async fn send(sock: &mut WebSocket, m: Utf8Bytes) -> bool {
+    matches!(tokio::time::timeout(WS_WRITE_TIMEOUT, sock.send(Message::Text(m))).await, Ok(Ok(())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iso_dates() {
+        assert_eq!(iso(0), "1970-01-01T00:00:00Z");
+        assert_eq!(iso(1_700_000_000), "2023-11-14T22:13:20Z");
+        assert_eq!(iso(951_782_400), "2000-02-29T00:00:00Z");
+    }
+}

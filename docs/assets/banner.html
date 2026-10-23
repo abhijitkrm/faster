@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Faster banner</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+  html, body { margin: 0; background: #0C0E11; }
+  .b { width: 1280px; height: 400px; box-sizing: border-box; padding: 64px 72px; background: #0C0E11; color: #E8EAED;
+       font-family: 'Geist', sans-serif; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; position: relative; }
+  .top { display: flex; align-items: center; gap: 22px; }
+  .word { font-size: 84px; font-weight: 700; letter-spacing: -0.045em; line-height: 1; }
+  .tag { font-size: 24px; color: #A3A9B2; margin-top: 18px; letter-spacing: -0.01em; }
+  .stats { display: flex; gap: 48px; font-family: 'Geist Mono', monospace; }
+  .stat .v { font-size: 30px; font-weight: 500; letter-spacing: -0.02em; }
+  .stat .v span { font-size: 15px; color: #8B929C; margin-left: 6px; }
+  .stat .l { font-size: 13px; color: #8B929C; margin-top: 6px; font-family: 'Geist', sans-serif; }
+  .lime { color: #C8F031; }
+  .tape { position: absolute; right: 72px; top: 64px; display: flex; gap: 8px; }
+  .tile { width: 92px; border: 1px solid #23272E; border-radius: 7px; padding: 10px; background: #111419; font-family: 'Geist Mono', monospace; font-size: 12px; color: #A3A9B2; }
+  .tile b { display: block; color: #E8EAED; font-weight: 500; margin-bottom: 8px; }
+  .tile i { display: block; height: 3px; background: #23272E; border-radius: 2px; }
+  .tile i s { display: block; height: 3px; background: #5B6470; border-radius: 2px; }
+  .tile.new { border-color: #C8F031; }
+  .tile.new i s { background: #C8F031; }
+  .fade { opacity: 0.55; } .fade2 { opacity: 0.3; }
+</style>
+</head>
+<body>
+<div class="b" id="banner">
+  <div class="tape" aria-hidden="true">
+    <div class="tile new"><b>#12,483,921</b>524 txs<i><s style="width:61%"></s></i></div>
+    <div class="tile"><b>#12,483,920</b>481 txs<i><s style="width:48%"></s></i></div>
+    <div class="tile fade"><b>#12,483,919</b>612 txs<i><s style="width:77%"></s></i></div>
+    <div class="tile fade2"><b>#12,483,918</b>390 txs<i><s style="width:35%"></s></i></div>
+  </div>
+  <div>
+    <div class="top">
+      <svg width="76" height="76" viewBox="0 0 22 22" aria-hidden="true"><path d="M3 4l7 7-7 7M11 4l7 7-7 7" fill="none" stroke="#C8F031" stroke-width="2.6" stroke-linecap="square"></path></svg>
+      <div class="word">faster</div>
+    </div>
+    <div class="tag">Real-time EVM block explorer. Indexed in milliseconds, served from memory.</div>
+  </div>
+  <div class="stats">
+    <div class="stat"><div class="v lime">0.04<span>ms</span></div><div class="l">transaction lookup</div></div>
+    <div class="stat"><div class="v">250K<span>tx/s</span></div><div class="l">indexing throughput</div></div>
+    <div class="stat"><div class="v">&lt; 1<span>ms</span></div><div class="l">block received → searchable</div></div>
+    <div class="stat"><div class="v">0<span>blocks</span></div><div class="l">behind the node</div></div>
+  </div>
+</div>
+</body>
+</html>
