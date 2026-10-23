@@ -204,7 +204,13 @@ impl Ingest {
                     store.hot.flush_index()?;
                     let c = chunk::write(store.chunks_root(), &b, start, end, last, &opts)?;
                     stats.chunk_write.observe(t.elapsed());
-                    tracing::info!(from = start, to = end, rows = b.rows(), ms = t.elapsed().as_millis() as u64, "chunk written");
+                    tracing::info!(
+                        from = start,
+                        to = end,
+                        rows = b.rows(),
+                        ms = t.elapsed().as_millis() as u64,
+                        "chunk written"
+                    );
                     Ok(c)
                 }));
                 rows = 0;
@@ -324,6 +330,69 @@ impl Ingest {
         .await??;
         self.store.notify();
         Ok(())
+    }
+}
+
+/// Merges runs of small adjacent chunks (the live tail writes many) into
+/// chunks of up to `chunk_rows` rows, one merge per call. Returns whether
+/// it merged anything.
+pub fn compact_once(store: &Store, cfg: &IngestConfig) -> Result<bool> {
+    let chunks = store.all_chunks();
+    let rows = |c: &chunk::Chunk| c.index.tables.iter().map(|t| t.rows).sum::<u64>() as usize;
+    let mut i = 0;
+    while i < chunks.len() {
+        let (mut sum, mut j) = (0usize, i);
+        while j < chunks.len()
+            && sum + rows(&chunks[j]) <= cfg.chunk_rows
+            && chunks[j].to_block() - chunks[i].from_block() <= cfg.chunk_max_blocks
+        {
+            sum += rows(&chunks[j]);
+            j += 1;
+        }
+        if j - i >= 2 {
+            let run = &chunks[i..j];
+            let t = Instant::now();
+            let merged = chunk::merge(store.chunks_root(), run, &cfg.write)?;
+            let keys: Vec<u64> = run.iter().map(|c| c.from_block()).collect();
+            let dirs: Vec<std::path::PathBuf> = run.iter().map(|c| c.dir.clone()).collect();
+            tracing::info!(
+                from = merged.from_block(),
+                to = merged.to_block(),
+                inputs = run.len(),
+                rows = sum,
+                ms = t.elapsed().as_millis() as u64,
+                "chunks compacted"
+            );
+            store.replace(merged, &keys);
+            for d in dirs {
+                std::fs::remove_dir_all(&d)?;
+            }
+            return Ok(true);
+        }
+        i = j.max(i + 1);
+    }
+    Ok(false)
+}
+
+/// Background compaction loop.
+pub async fn compactor(store: Arc<Store>, cfg: IngestConfig, every: Duration) {
+    loop {
+        tokio::time::sleep(every).await;
+        loop {
+            let (s, c) = (store.clone(), cfg.clone());
+            match tokio::task::spawn_blocking(move || compact_once(&s, &c)).await {
+                Ok(Ok(true)) => continue,
+                Ok(Ok(false)) => break,
+                Ok(Err(e)) => {
+                    tracing::error!(error = %format!("{e:#}"), "compaction failed");
+                    break;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "compaction panicked");
+                    break;
+                }
+            }
+        }
     }
 }
 

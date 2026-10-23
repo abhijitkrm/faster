@@ -21,7 +21,8 @@ async fn main() -> anyhow::Result<()> {
     let shape = Shape { txs_per_block: txs, logs_per_tx: logs, contracts: 200_000, accounts: 2_000_000, block_time: 2 };
     let chain = FakeChain::new(shape, blocks + 100);
     let url = chain.clone().serve(0).await;
-    let rpc = Arc::new(Rpc::new(RpcConfig { url, timeout: Duration::from_secs(60), batch: 1000, rps: 0, traces: false })?);
+    let rpc =
+        Arc::new(Rpc::new(RpcConfig { url, timeout: Duration::from_secs(60), batch: 1000, rps: 0, traces: false })?);
     let store = Arc::new(Store::open(&dir, 0x7a69, 0)?);
     let mut cfg = IngestConfig { window: 20, concurrency: 8, end_block: Some(blocks - 1), ..Default::default() };
     cfg.chunk_rows = std::env::var("CHUNK_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(cfg.chunk_rows);

@@ -570,8 +570,11 @@ dependencies = [
  "axum",
  "bincode",
  "bytes",
+ "faster-sync-client",
  "futures",
+ "futures-util",
  "hex",
+ "http-body-util",
  "lru",
  "memmap2",
  "parquet",
@@ -582,11 +585,26 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
  "xorf",
  "xxhash-rust",
+]
+
+[[package]]
+name = "faster-sync-client"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "bytes",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

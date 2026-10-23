@@ -27,7 +27,7 @@ use crate::chunk::Chunk;
 use crate::filter::{filtered_cols, key};
 use crate::hot::HotBlock;
 use crate::metrics::Metrics;
-use crate::model::{parse_hex, Batches, Table, TABLES};
+use crate::model::{parse_hex, Table, TABLES};
 use crate::store::Store;
 
 // ── request ─────────────────────────────────────────────────────────────
@@ -124,6 +124,18 @@ pub struct Query {
     pub fields: Fields,
     pub max_rows: Option<usize>,
     pub max_ms: Option<u64>,
+    /// Hash of block `from_block - 1` as the client last saw it. If that
+    /// block is no longer canonical the query fails with `Reorg`, so a
+    /// client following the tip notices reorgs.
+    pub parent_hash: Option<String>,
+}
+
+/// The client's view of the chain diverged from ours.
+#[derive(Debug, thiserror::Error)]
+#[error("reorg: block {block} with hash {hash} is not canonical")]
+pub struct Reorg {
+    pub block: u64,
+    pub hash: String,
 }
 
 pub struct Limits {
@@ -218,7 +230,18 @@ pub struct Plan {
 const DEFAULT_FIELDS: [&[&str]; 4] = [
     &["number", "hash", "parent_hash", "timestamp"],
     &["block_number", "transaction_index", "hash", "from", "to", "value", "input", "status", "gas_used"],
-    &["block_number", "log_index", "transaction_index", "transaction_hash", "address", "topic0", "topic1", "topic2", "topic3", "data"],
+    &[
+        "block_number",
+        "log_index",
+        "transaction_index",
+        "transaction_hash",
+        "address",
+        "topic0",
+        "topic1",
+        "topic2",
+        "topic3",
+        "data",
+    ],
     &["block_number", "transaction_index", "trace_address", "type", "from", "to", "value", "input", "output", "error"],
 ];
 
@@ -245,10 +268,21 @@ impl Plan {
     pub fn new(q: &Query, store: &Store, lim: &Limits) -> Result<Plan> {
         let last = store.last().map(|h| h.number + 1).unwrap_or(store.start_block());
         let to = q.to_block.unwrap_or(last).min(last);
-        let n_values: usize = q.logs.iter().map(|s| s.address.len() + s.topics.iter().map(|t| t.len()).sum::<usize>()).sum::<usize>()
-            + q.transactions.iter().map(|s| s.from.len() + s.to.len() + s.sighash.len() + s.hash.len() + s.contract_address.len()).sum::<usize>()
-            + q.traces.iter().map(|s| s.from.len() + s.to.len() + s.sighash.len()).sum::<usize>()
-            + q.blocks.iter().map(|s| s.hash.len() + s.miner.len()).sum::<usize>();
+        let n_values: usize =
+            q.logs.iter().map(|s| s.address.len() + s.topics.iter().map(|t| t.len()).sum::<usize>()).sum::<usize>()
+                + q.transactions
+                    .iter()
+                    .map(|s| s.from.len() + s.to.len() + s.sighash.len() + s.hash.len() + s.contract_address.len())
+                    .sum::<usize>()
+                + q.traces.iter().map(|s| s.from.len() + s.to.len() + s.sighash.len()).sum::<usize>()
+                + q.blocks.iter().map(|s| s.hash.len() + s.miner.len()).sum::<usize>();
+        if let Some(ph) = &q.parent_hash {
+            let h = values::<32>("parent_hash", std::slice::from_ref(ph))?.into_iter().next().unwrap();
+            let parent = q.from_block.checked_sub(1).ok_or_else(|| anyhow!("parent_hash needs from_block > 0"))?;
+            if store.hot.block_number(h.as_slice().try_into().unwrap())? != Some(parent) {
+                return Err(Reorg { block: parent, hash: ph.clone() }.into());
+            }
+        }
         if n_values > lim.max_selection_values {
             bail!("too many selection values ({n_values} > {})", lim.max_selection_values);
         }
@@ -340,10 +374,12 @@ impl Plan {
 
 // ── data sources: a chunk, or the hot blocks ────────────────────────────
 
+pub type PredFn = Box<dyn FnMut(&RecordBatch) -> Result<BooleanArray> + Send>;
+
 /// Row predicate evaluated on the predicate columns of a batch.
 pub struct Pred {
     pub cols: Vec<usize>,
-    pub f: Box<dyn FnMut(&RecordBatch) -> Result<BooleanArray> + Send>,
+    pub f: PredFn,
     /// Every matching row has one of these values in the table's cluster
     /// column (lets a chunk read only the pages that can hold them).
     pub cluster: Option<Vec<Vec<u8>>>,
@@ -382,11 +418,8 @@ impl Source for Chunk {
     fn read(&self, t: Table, groups: &[(usize, Vec<bool>)], cols: &[usize], pred: Pred) -> Result<Vec<RecordBatch>> {
         let gs: Vec<usize> = groups.iter().map(|g| g.0).collect();
         let masks: Vec<Vec<bool>> = groups.iter().map(|g| g.1.clone()).collect();
-        let mut sel = if masks.iter().all(|m| m.iter().all(|x| *x)) {
-            None
-        } else {
-            Some(self.sub_selection(t, &gs, &masks))
-        };
+        let mut sel =
+            if masks.iter().all(|m| m.iter().all(|x| *x)) { None } else { Some(self.sub_selection(t, &gs, &masks)) };
         if let (Some(vals), Some(c)) = (&pred.cluster, crate::chunk::cluster_col(t)) {
             let v: Vec<&[u8]> = vals.iter().map(|v| v.as_slice()).collect();
             if let Some(p) = self.page_selection(t, &gs, t.col_index(c).unwrap(), &v) {
@@ -401,38 +434,44 @@ impl Source for Chunk {
     }
 }
 
+/// Hot blocks: each block is one group with one sub-group (no filters;
+/// the tail is small and in memory).
 struct HotSource {
-    batches: Batches,
-    ranges: [(u64, u64); 4],
-}
-
-impl HotSource {
-    fn new(blocks: &[Arc<HotBlock>]) -> HotSource {
-        let parts: Vec<Batches> = blocks.iter().map(|b| b.batches.clone()).collect();
-        let lo = blocks.first().map(|b| b.head.number).unwrap_or(0);
-        let hi = blocks.last().map(|b| b.head.number).unwrap_or(0);
-        HotSource { batches: Batches::concat(&parts), ranges: [(lo, hi); 4] }
-    }
+    blocks: Vec<Arc<HotBlock>>,
 }
 
 impl Source for HotSource {
     fn groups(&self, t: Table) -> usize {
-        usize::from(self.batches.get(t).num_rows() > 0)
+        let _ = t;
+        self.blocks.len()
     }
-    fn subs(&self, _t: Table, _g: usize) -> usize {
-        1
+    fn subs(&self, t: Table, g: usize) -> usize {
+        usize::from(self.blocks[g].batches.get(t).num_rows() > 0)
     }
-    fn sub_range(&self, t: Table, _g: usize, _s: usize) -> (u64, u64) {
-        self.ranges[t.idx()]
+    fn sub_range(&self, _t: Table, g: usize, _s: usize) -> (u64, u64) {
+        let n = self.blocks[g].head.number;
+        (n, n)
     }
     fn may_contain(&self, _t: Table, _g: usize, _s: usize, _col: &str, _keys: &[u64]) -> bool {
         true
     }
-    fn read(&self, t: Table, _groups: &[(usize, Vec<bool>)], cols: &[usize], mut pred: Pred) -> Result<Vec<RecordBatch>> {
-        let b = self.batches.get(t);
-        let _ = pred.cluster;
-        let m = (pred.f)(&b.project(&pred.cols)?)?;
-        Ok(vec![filter_record_batch(&b.project(cols)?, &m)?])
+    fn read(
+        &self,
+        t: Table,
+        groups: &[(usize, Vec<bool>)],
+        cols: &[usize],
+        mut pred: Pred,
+    ) -> Result<Vec<RecordBatch>> {
+        let mut out = Vec::with_capacity(groups.len());
+        for (g, _) in groups {
+            let b = self.blocks[*g].batches.get(t);
+            let m = (pred.f)(&b.project(&pred.cols)?)?;
+            let r = filter_record_batch(&b.project(cols)?, &m)?;
+            if r.num_rows() > 0 {
+                out.push(r);
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -489,7 +528,7 @@ impl Ctx<'_> {
                         || join_blocks.is_some_and(|b| any_in(b, r))
                         || sels.iter().any(|sel| {
                             sel.blocks.as_ref().is_none_or(|b| any_in(b, r))
-                                && sel.fields.iter().all(|f| self.src.may_contain(t, g, s, &f.col, &f.keys))
+                                && sel.fields.iter().all(|f| self.src.may_contain(t, g, s, f.col, &f.keys))
                         }));
                 if hit {
                     self.read += 1;
@@ -509,7 +548,13 @@ impl Ctx<'_> {
     /// Reads candidate groups of `t` and keeps rows that match a selection
     /// (or all rows when `all`) or whose (block, tx index) is in `join`.
     /// Only the predicate columns are decoded for rows that do not match.
-    fn scan(&mut self, t: Table, sels: &Sels, all: bool, join: Option<(Arc<TxKeys>, &BTreeSet<u64>)>) -> Result<Vec<RecordBatch>> {
+    fn scan(
+        &mut self,
+        t: Table,
+        sels: &Sels,
+        all: bool,
+        join: Option<(Arc<TxKeys>, &BTreeSet<u64>)>,
+    ) -> Result<Vec<RecordBatch>> {
         if !all && sels.is_empty() && join.as_ref().is_none_or(|(k, _)| k.is_empty()) {
             return Ok(Vec::new());
         }
@@ -563,22 +608,8 @@ impl Ctx<'_> {
 
 /// Rows of a clustered table back in (block, index) order.
 fn block_order(t: Table, rows: &[RecordBatch]) -> Result<RecordBatch> {
-    use arrow::compute::{concat_batches, take_record_batch};
-    let b = concat_batches(&rows[0].schema(), rows)?;
-    let idx_col = if t == Table::Logs { "log_index" } else { "transaction_index" };
-    let (bn, ix) = (u64s(&b, t.block_col()).unwrap(), u64s(&b, idx_col).unwrap());
-    // One u64 key per row: (block, index) packed, then an unstable sort of
-    // (key, position) pairs; much cheaper than a two-column lexsort.
-    let lo = bn.values().iter().min().copied().unwrap_or(0);
-    let mut keyed: Vec<(u64, u32)> = (0..b.num_rows())
-        .map(|i| (((bn.value(i) - lo) << 24) | ix.value(i).min((1 << 24) - 1), i as u32))
-        .collect();
-    if keyed.windows(2).all(|w| w[0].0 <= w[1].0) {
-        return Ok(b);
-    }
-    keyed.sort_unstable();
-    let idx = UInt32Array::from_iter_values(keyed.into_iter().map(|(_, i)| i));
-    Ok(take_record_batch(&b, &idx)?)
+    let b = arrow::compute::concat_batches(&rows[0].schema(), rows)?;
+    crate::chunk::block_order(t, &b)
 }
 
 fn fixed<'a>(b: &'a RecordBatch, n: &str) -> Option<&'a FixedSizeBinaryArray> {
@@ -844,7 +875,12 @@ fn unit_may_match(plan: &Plan, c: &Chunk, a: u64, b: u64) -> bool {
     if plan.include_all_blocks {
         return true;
     }
-    let tabs = [(Table::Logs, &plan.logs), (Table::Transactions, &plan.txs), (Table::Traces, &plan.traces), (Table::Blocks, &plan.blocks)];
+    let tabs = [
+        (Table::Logs, &plan.logs),
+        (Table::Transactions, &plan.txs),
+        (Table::Traces, &plan.traces),
+        (Table::Blocks, &plan.blocks),
+    ];
     tabs.iter().any(|(t, sels)| {
         !sels.is_empty()
             && (0..c.groups(*t)).any(|g| {
@@ -916,7 +952,12 @@ pub async fn execute_to(store: Arc<Store>, plan: Plan, metrics: &Metrics, out: O
         .buffered(plan.parallelism);
 
     // Accepts a finished part in order; true when the page is full.
-    let mut take = async |mut part: Part, end: u64, bytes: Option<bytes::Bytes>, rows: &mut usize, next: &mut u64| -> Result<bool> {
+    let mut take = async |mut part: Part,
+                          end: u64,
+                          bytes: Option<bytes::Bytes>,
+                          rows: &mut usize,
+                          next: &mut u64|
+           -> Result<bool> {
         metrics.row_groups_read.fetch_add(part.groups_read, std::sync::atomic::Ordering::Relaxed);
         metrics.row_groups_skipped.fetch_add(part.groups_skipped, std::sync::atomic::Ordering::Relaxed);
         let budget = plan.max_rows.saturating_sub(*rows);
@@ -976,7 +1017,7 @@ pub async fn execute_to(store: Arc<Store>, plan: Plan, metrics: &Metrics, out: O
         let plan2 = plan.clone();
         let (a, b) = (next.max(from), view.end);
         let part = tokio::task::spawn_blocking(move || {
-            let src = HotSource::new(&hot);
+            let src = HotSource { blocks: hot };
             run_source(&plan2, &src, a, b)
         })
         .await??;

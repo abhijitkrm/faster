@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::filter::{filtered_cols, key, Filter};
 use crate::model::{Batches, BlockHead, Table, TABLES};
 
-const INDEX_MAGIC: &[u8; 8] = b"FSYNIDX1";
+const INDEX_MAGIC: &[u8; 8] = b"FSYNIDX2";
 
 /// A run of `SUB_ROWS` rows of a row group (page aligned): the unit of
 /// filtering, so a hit decodes a few pages rather than a whole row group.
@@ -126,13 +126,8 @@ impl Chunk {
     /// groups of the chunk's largest table.
     pub fn slices(&self, from: u64, to: u64, groups: usize) -> Vec<(u64, u64)> {
         let t = self.index.tables.iter().max_by_key(|t| t.rows).expect("tables");
-        let mut cuts: Vec<u64> = t
-            .row_groups
-            .iter()
-            .step_by(groups.max(1))
-            .map(|g| g.min_block)
-            .filter(|b| *b > from && *b < to)
-            .collect();
+        let mut cuts: Vec<u64> =
+            t.row_groups.iter().step_by(groups.max(1)).map(|g| g.min_block).filter(|b| *b > from && *b < to).collect();
         cuts.dedup();
         let mut out = Vec::with_capacity(cuts.len() + 1);
         let mut a = from;
@@ -198,7 +193,8 @@ impl Chunk {
         for &g in row_groups {
             let rows = md.row_group(g).num_rows() as usize;
             let pi = md.page_index_for_row_group(g);
-            let (Some(ColumnIndexMetaData::FIXED_LEN_BYTE_ARRAY(ci)), Some(oi)) = (pi.column_index(col), pi.offset_index(col))
+            let (Some(ColumnIndexMetaData::FIXED_LEN_BYTE_ARRAY(ci)), Some(oi)) =
+                (pi.column_index(col), pi.offset_index(col))
             else {
                 return None;
             };
@@ -312,15 +308,14 @@ fn props(t: Table, o: &WriteOpts) -> WriterProperties {
             .set_data_page_row_count_limit(PAGE_ROWS)
             .set_write_batch_size(PAGE_ROWS);
     }
-    b
-        .set_compression(match o.codec {
-            Codec::Lz4 => Compression::LZ4_RAW,
-            Codec::Zstd(l) => Compression::ZSTD(ZstdLevel::try_new(l).unwrap_or_default()),
-            Codec::None => Compression::UNCOMPRESSED,
-        })
-        .set_max_row_group_row_count(Some(o.row_group_rows))
-        .set_statistics_enabled(EnabledStatistics::Chunk)
-        .build()
+    b.set_compression(match o.codec {
+        Codec::Lz4 => Compression::LZ4_RAW,
+        Codec::Zstd(l) => Compression::ZSTD(ZstdLevel::try_new(l).unwrap_or_default()),
+        Codec::None => Compression::UNCOMPRESSED,
+    })
+    .set_max_row_group_row_count(Some(o.row_group_rows))
+    .set_statistics_enabled(EnabledStatistics::Chunk)
+    .build()
 }
 
 /// Writes `b` (blocks `from..to`) as a chunk under `root/chunks/` and
@@ -421,6 +416,61 @@ fn group_index(t: Table, b: &RecordBatch) -> RowGroupIndex {
 fn sync_dir(p: &Path) -> Result<()> {
     File::open(p)?.sync_all()?;
     Ok(())
+}
+
+impl Chunk {
+    /// Every row of every table, in block order.
+    pub fn read_all(&self) -> Result<Batches> {
+        let mut tables = Vec::with_capacity(4);
+        for t in TABLES {
+            let groups: Vec<usize> = (0..self.index.tables[t.idx()].row_groups.len()).collect();
+            let cols: Vec<usize> = (0..t.cols().len()).collect();
+            let parts = self.read(t, &groups, &cols)?;
+            let b = if parts.is_empty() {
+                RecordBatch::new_empty(t.schema())
+            } else {
+                arrow::compute::concat_batches(&t.schema(), &parts)?
+            };
+            tables.push(if cluster_col(t).is_some() { block_order(t, &b)? } else { b });
+        }
+        Ok(Batches { tables: tables.try_into().ok().unwrap() })
+    }
+}
+
+/// Rows back in (block, index) order (undoes clustering).
+pub fn block_order(t: Table, b: &RecordBatch) -> Result<RecordBatch> {
+    use arrow::compute::take_record_batch;
+    let idx_col = if t == Table::Logs { "log_index" } else { "transaction_index" };
+    let col = |n: &str| b.column_by_name(n).and_then(|a| a.as_any().downcast_ref::<UInt64Array>().cloned());
+    let (Some(bn), Some(ix)) = (col(t.block_col()), col(idx_col)) else { return Ok(b.clone()) };
+    // One u64 key per row: (block, index) packed; then an unstable sort of
+    // (key, position) pairs, much cheaper than a two-column lexsort.
+    let lo = bn.values().iter().min().copied().unwrap_or(0);
+    let mut keyed: Vec<(u64, u32)> =
+        (0..b.num_rows()).map(|i| (((bn.value(i) - lo) << 24) | ix.value(i).min((1 << 24) - 1), i as u32)).collect();
+    if keyed.windows(2).all(|w| w[0].0 <= w[1].0) {
+        return Ok(b.clone());
+    }
+    keyed.sort_unstable();
+    let idx = arrow::array::UInt32Array::from_iter_values(keyed.into_iter().map(|(_, i)| i));
+    Ok(take_record_batch(b, &idx)?)
+}
+
+/// Merges adjacent chunks into one new chunk (published under its own
+/// name; the caller swaps it in and deletes the inputs).
+pub fn merge(root: &Path, chunks: &[Arc<Chunk>], o: &WriteOpts) -> Result<Chunk> {
+    let (first, last) = (chunks.first().expect("chunks"), chunks.last().expect("chunks"));
+    let mut parts = Vec::with_capacity(chunks.len());
+    for w in chunks.windows(2) {
+        if w[0].to_block() != w[1].from_block() {
+            bail!("merge: chunks are not adjacent");
+        }
+    }
+    for c in chunks {
+        parts.push(c.read_all()?);
+    }
+    let b = Batches::concat(&parts);
+    write(root, &b, first.from_block(), last.to_block(), last.index.last, o)
 }
 
 /// The published chunks, keyed by first block.

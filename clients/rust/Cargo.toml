@@ -1,0 +1,20 @@
+[package]
+name = "faster-sync-client"
+version = "0.1.0"
+edition = "2021"
+description = "Rust client for faster-sync: paged queries (JSON or Arrow), tip following, reorg detection"
+license = "UNLICENSED"
+publish = false
+
+[dependencies]
+arrow = { version = "60", default-features = false, features = ["ipc", "ipc_compression"] }
+bytes = "1"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

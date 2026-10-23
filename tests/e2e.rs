@@ -127,7 +127,8 @@ async fn ingest_query_reorg_restart() {
     assert!(!store.hot.is_empty(), "tail is in the hot tier");
 
     // A rare contract across all history.
-    let rare = (100..2000).find(|i| !brute_logs(&chain, 600, |l| l["address"] == hx(&contract_addr(*i))).is_empty()).unwrap();
+    let rare =
+        (100..2000).find(|i| !brute_logs(&chain, 600, |l| l["address"] == hx(&contract_addr(*i))).is_empty()).unwrap();
     let want = brute_logs(&chain, 600, |l| l["address"] == hx(&contract_addr(rare)));
     let q = Query {
         from_block: 0,
@@ -220,14 +221,23 @@ async fn ingest_query_reorg_restart() {
     assert_eq!(keys(&run(&store, q).await, Table::Transactions), want);
 
     // Reorg of the last 3 blocks, then 2 new blocks.
+    let old_599 = hx(&chain.block_hash(599));
     chain.reorg(598);
     chain.head.store(602, std::sync::atomic::Ordering::Relaxed);
     wait_height(&store, 602, chain.block_hash(602)).await;
     for n in 590..=602 {
-        let r = run(&store, Query { from_block: n, to_block: Some(n + 1), include_all_blocks: true, ..Default::default() }).await;
+        let r =
+            run(&store, Query { from_block: n, to_block: Some(n + 1), include_all_blocks: true, ..Default::default() })
+                .await;
         let hs = fixed_col(&r.tables[0][0], "hash");
         assert_eq!(hs.value(0), chain.block_hash(n), "block {n} after reorg");
     }
+    // A client that saw the old block 599 is told about the reorg.
+    let stale = Query { from_block: 600, parent_hash: Some(old_599), ..Default::default() };
+    let e = Plan::new(&stale, &store, &Limits::default()).err().expect("reorg detected");
+    assert!(e.downcast_ref::<query::Reorg>().is_some(), "{e}");
+    let fresh = Query { from_block: 600, parent_hash: Some(hx(&chain.block_hash(599))), ..Default::default() };
+    assert!(Plan::new(&fresh, &store, &Limits::default()).is_ok());
     let want = brute_logs(&chain, 602, |l| l["address"] == busy);
     let q = Query {
         from_block: 0,
@@ -237,6 +247,22 @@ async fn ingest_query_reorg_restart() {
         ..Default::default()
     };
     assert_eq!(keys(&run(&store, q.clone()).await, Table::Logs), want);
+
+    // Compaction while ingest keeps running: fewer chunks, same answers.
+    let before = store.chunk_count();
+    let mut c = cfg();
+    c.chunk_rows = 40_000;
+    while faster_sync::ingest::compact_once(&store, &c).unwrap() {}
+    assert!(store.chunk_count() < before, "compacted {before} -> {}", store.chunk_count());
+    assert_eq!(keys(&run(&store, q.clone()).await, Table::Logs), want);
+    let rare_q = Query {
+        from_block: 0,
+        to_block: Some(603),
+        logs: vec![LogSel { address: vec![hx(&contract_addr(rare))], topics: vec![] }],
+        ..Default::default()
+    };
+    let want_rare = brute_logs(&chain, 602, |l| l["address"] == hx(&contract_addr(rare)));
+    assert_eq!(keys(&run(&store, rare_q).await, Table::Logs), want_rare);
 
     // Restart on the same data dir.
     h.abort();

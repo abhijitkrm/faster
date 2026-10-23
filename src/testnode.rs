@@ -116,7 +116,7 @@ impl FakeChain {
     }
 
     pub fn tx_contract(&self, n: u64, i: u64) -> u64 {
-        Self::skewed(mix(n * 1_000_003 + i ^ self.salt(n)), self.shape.contracts)
+        Self::skewed(mix((n * 1_000_003 + i) ^ self.salt(n)), self.shape.contracts)
     }
 
     /// (block json with full txs, receipts json)
@@ -136,7 +136,7 @@ impl FakeChain {
             let c = self.tx_contract(n, i);
             let to = contract_addr(c);
             let create = i == 0 && n % 100 == 7;
-            let sig: [u8; 4] = if r % 3 == 0 { [0x09, 0x5e, 0xa7, 0xb3] } else { [0xa9, 0x05, 0x9c, 0xbb] };
+            let sig: [u8; 4] = if r.is_multiple_of(3) { [0x09, 0x5e, 0xa7, 0xb3] } else { [0xa9, 0x05, 0x9c, 0xbb] };
             let mut input = sig.to_vec();
             input.extend_from_slice(&[0u8; 12]);
             input.extend_from_slice(&account_addr(mix(r) % s.accounts));
@@ -174,7 +174,7 @@ impl FakeChain {
             rcs.push(json!({
                 "transactionHash": hx(&th), "transactionIndex": q(i), "blockHash": hx(&hash), "blockNumber": q(n),
                 "from": hx(&from), "to": if create { Value::Null } else { Value::from(hx(&to)) },
-                "status": if r % 50 == 0 { "0x0" } else { "0x1" }, "gasUsed": q(gas_used), "cumulativeGasUsed": q(cum),
+                "status": if r.is_multiple_of(50) { "0x0" } else { "0x1" }, "gasUsed": q(gas_used), "cumulativeGasUsed": q(cum),
                 "effectiveGasPrice": q(1_001_000_000), "contractAddress": ca, "logs": logs,
                 "logsBloom": hx(&[0u8; 256]), "type": "0x2"
             }));
@@ -207,7 +207,8 @@ impl FakeChain {
                 let Some(n) = num(&p[0]).filter(|n| *n <= head) else { return Ok(Value::Null) };
                 let (mut b, _) = self.block(n);
                 if !p[1].as_bool().unwrap_or(false) {
-                    let hs: Vec<Value> = b["transactions"].as_array().unwrap().iter().map(|t| t["hash"].clone()).collect();
+                    let hs: Vec<Value> =
+                        b["transactions"].as_array().unwrap().iter().map(|t| t["hash"].clone()).collect();
                     b["transactions"] = Value::Array(hs);
                 }
                 Ok(b)

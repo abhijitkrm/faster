@@ -7,6 +7,9 @@ license = "UNLICENSED"
 publish = false
 default-run = "faster-sync"
 
+[workspace]
+members = [".", "clients/rust"]
+
 [lib]
 name = "faster_sync"
 path = "src/lib.rs"
@@ -35,7 +38,11 @@ xorf = { version = "0.13", features = ["serde"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]
+faster-sync-client = { path = "clients/rust" }
+futures-util = "0.3"
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 [profile.release]
 opt-level = 3

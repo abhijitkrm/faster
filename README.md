@@ -1,55 +1,111 @@
 # faster-sync
 
-Bulk historical data API for EVM chains: ask for exactly the blocks, transactions,
-receipts, logs and traces you need across any block range, get them back as columnar
-data in pages. Built so an indexer can catch up on months of history in seconds instead
-of millions of `eth_getLogs` calls.
+Bulk historical data API for EVM chains: ask for exactly the blocks,
+transactions, receipts, logs and call traces you need across any block range
+and get them back in pages, as JSON or Arrow. Built so an indexer catches up
+on months of history in seconds instead of millions of `eth_getLogs` calls.
 
 Part of the Faster stack: [faster](https://github.com/abhijitkrm/faster) (explorer) ·
 faster-sync · [faster-rpc](https://github.com/abhijitkrm/faster-rpc) ·
-[faster-index](https://github.com/abhijitkrm/faster-index).
+[faster-index](https://github.com/abhijitkrm/faster-index). Clean-room
+implementation.
 
-Status: design. Clean-room implementation, no code from other projects.
+| | faster-sync | ClickHouse (best layout) |
+|---|---:|---:|
+| one rare contract, all history | **3.4 ms** | 4.3 ms |
+| busiest contract, 511K logs | **49 ms** | 65 ms |
+| one wallet's incoming Transfers | **3.4 ms** | 9.2 ms |
+| 9M logs, streamed in 10 pages | **0.89 s** | 0.94 s |
 
-## Query model
+Synthetic 12M-row chain, laptop; method, mainnet numbers and where
+ClickHouse still wins: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
-```jsonc
-POST /query
-{
-  "from_block": 0,
-  "to_block": null,                       // null = up to the archive head
-  "logs": [{ "address": ["0x…"], "topics": [["0xddf252ad…"], [], ["0x…"]] }],
-  "transactions": [{ "from": ["0x…"], "to": [], "sighash": ["0xa9059cbb"], "status": 1 }],
-  "traces": [{ "to": ["0x…"], "call_type": ["call"] }],
-  "join": "logs_with_transactions",        // also pull the tx (and block) behind each match
-  "fields": { "log": ["block_number","log_index","address","topics","data"], "transaction": ["hash","from","to","value"] },
-  "max_rows": 100000
-}
+## How it works
+
+- **Immutable chunks.** Finalized history is cut into chunks of block
+  ranges (~2M rows each). A chunk is one Parquet file per table (blocks,
+  transactions + receipts, logs, traces) plus an index: per 4,096-row
+  sub-group, the block range and binary fuse filters (~9 bits per value)
+  over addresses, topics, senders, recipients and function selectors.
+- **Clustered logs.** Inside each row group, logs are sorted by contract
+  address and the file carries page-level min/max, so a contract query reads
+  only the pages holding that contract, even for the busiest contracts.
+- **Pruned, parallel, streamed.** A query checks the filters, skips every
+  sub-group that cannot match, decodes the filter columns first and the rest
+  only for matching rows, runs row-group-sized work units in parallel, and
+  streams each unit's Arrow frames as soon as it is done.
+- **Hot tail in RocksDB.** Blocks newer than the finalized head live in a
+  RocksDB hot tier (and in memory) with parent-hash checks; reorgs roll them
+  back. Finalized hot blocks are moved into chunks, and small chunks are
+  compacted. Tx-hash and block-hash indexes cover all history.
+- **Exact node objects.** Every column the node sends is kept, plus any
+  chain-specific keys in an `extra` column, so `?shape=rpc` rebuilds the
+  node's own JSON-RPC objects (faster-rpc uses this).
+
+## Quick start
+
+```bash
+docker build -t faster-sync .
+docker run -d -p 3100:3100 -v fsync-data:/data \
+  -e RPC_URL=https://your-node -e START_BLOCK=20000000 faster-sync
+
+curl -s localhost:3100/height
+curl -s localhost:3100/query -H 'content-type: application/json' -d '{
+  "from_block": 20000000,
+  "logs": [{"address": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
+            "topics": [["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"]]}],
+  "fields": {"log": ["block_number", "log_index", "topic1", "topic2", "data"]}
+}'
 ```
 
-Response: an Arrow IPC stream (JSON for debugging) with one table per selected kind, plus
-`next_block` to continue from. Each request has a time and size budget, so the server
-returns what it scanned and the client continues.
+The node needs `eth_getBlockByNumber` and `eth_getBlockReceipts` (falls
+back to per-transaction receipts); `TRACES=true` also needs
+`debug_traceBlockByNumber` with `callTracer`. Public endpoints work with
+`RPC_RPS` and `RPC_BATCH` set to their limits.
 
-## Storage design
+Without `RPC_URL` the binary serves an existing data directory read-only
+(replicas, benchmarks).
 
-- History is cut into immutable chunks of block ranges. Each chunk stores blocks,
-  transactions, receipts, logs and traces as compressed columns (Arrow / Parquet).
-- Every chunk has small filters (bloom / xor) over addresses, topics 0–3, from, to and
-  function selectors. A query skips every chunk that cannot match, so "one contract across
-  all history" reads only the chunks that contain it.
-- Immutable chunks replicate and cache trivially (and can move to object storage when old).
-- Only finalized blocks enter chunks; the newest blocks are served from the hot tier
-  (RocksDB, shared design with the faster explorer), so reorgs never touch chunk files.
+## Clients
 
-## Plan
+- Rust: [`clients/rust`](clients/rust) (`faster-sync-client`): JSON or Arrow
+  pages, `stream()` that follows the tip and reports reorgs.
+- TypeScript: [`clients/ts`](clients/ts) (`faster-sync-client`): same model,
+  no dependencies; used by faster-index.
 
-1. Benchmark the chunk design (in-process, DataFusion over Parquet with per-chunk filters)
-   against ClickHouse for the three query shapes that matter: a rare contract across all
-   history, a busy contract, and one event signature across all contracts. Measure rows/s
-   to the client and time to first page.
-2. Ingest: parallel backfill + live tail from JSON-RPC (reusing faster's fetcher), later a
-   direct feed from evm-node.
-3. Query engine + HTTP API with budgets and `next_block` paging.
-4. Clients: Rust first, then TypeScript (used by faster-index), then Python.
-5. Ops: metrics, chunk compaction, retention / object storage, replicas.
+## Configuration
+
+| Variable | Default | |
+|---|---|---|
+| `RPC_URL` | — | node JSON-RPC (unset = serve-only) |
+| `DATA_DIR` | `./data` | chunks, hot tier, metadata |
+| `START_BLOCK` | `0` | first block to ingest (fixed at first start) |
+| `TRACES` | `false` | fetch `callTracer` traces |
+| `RPC_BATCH` / `RPC_RPS` / `RPC_TIMEOUT_MS` | 100 / 0 (off) / 30000 | calls per HTTP request, requests per second, timeout |
+| `FETCH_WINDOW` / `FETCH_CONCURRENCY` | 20 / 8 | blocks per fetch task, tasks in flight |
+| `FINALITY_DEPTH` / `USE_FINALIZED_TAG` | 64 / true | what counts as final (node's `finalized` tag when it has one) |
+| `CHUNK_ROWS` / `CHUNK_MAX_BLOCKS` | 2,000,000 / 250,000 | chunk size during backfill and compaction |
+| `HOT_MAX_ROWS` / `HOT_MAX_AGE_SECS` | 500,000 / 3600 | when finalized hot blocks are chunked |
+| `ROW_GROUP_ROWS` / `COMPRESSION` | 32768 / `lz4` | Parquet layout (`lz4`, `zstd<level>`, `none`) |
+| `COMPACT_EVERY_SECS` | 300 | compaction interval (0 = off) |
+| `LISTEN` / `ADMIN_LISTEN` | `0.0.0.0:3100` / `127.0.0.1:9101` | API / metrics |
+| `QUERY_MAX_ROWS` / `QUERY_MAX_MS` | 200,000 / 5000 | page budget caps |
+| `QUERY_PARALLELISM` / `QUERY_CONCURRENCY` | cores / 32 | work units per query / queries at once |
+| `API_KEYS` | — | comma-separated bearer keys (required when set) |
+| `RATE_LIMIT_RPS` / `RATE_LIMIT_BURST` | 0 (off) / 50 | per key, else per IP |
+| `TRUST_PROXY` / `CORS_ORIGINS` | false / — | client IP from `X-Forwarded-For`; allowed origins |
+| `READY_MAX_LAG` | 10 | `/ready` threshold in blocks |
+| `LOG_FORMAT` | text | `json` for structured logs |
+
+## Documentation
+
+- [docs/API.md](docs/API.md): query model, responses, Arrow framing, errors
+- [docs/BENCHMARK.md](docs/BENCHMARK.md): method and results vs ClickHouse
+
+## Development
+
+```bash
+cargo test --release --workspace      # unit, e2e (fake node: backfill, reorg, restart, compaction), API, client
+fakechain 8545 1000 500 &             # deterministic fake node, a block every 500 ms
+RPC_URL=http://127.0.0.1:8545 cargo run --release
+```

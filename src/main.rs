@@ -17,12 +17,7 @@ fn env<T: std::str::FromStr>(k: &str, d: T) -> T {
 }
 
 fn env_list(k: &str) -> Vec<String> {
-    std::env::var(k)
-        .unwrap_or_default()
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
+    std::env::var(k).unwrap_or_default().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
 }
 
 #[tokio::main]
@@ -39,7 +34,8 @@ async fn main() -> Result<()> {
     let Ok(rpc_url) = std::env::var("RPC_URL") else {
         // Serve-only: answer queries from an existing data dir (replicas,
         // benchmarks); nothing is ingested.
-        let store = Arc::new(Store::open_read_only(&data).context("RPC_URL unset: serve-only needs an existing DATA_DIR")?);
+        let store =
+            Arc::new(Store::open_read_only(&data).context("RPC_URL unset: serve-only needs an existing DATA_DIR")?);
         tracing::info!(chain_id = store.meta.chain_id, "serve-only (no RPC_URL)");
         return serve(store, Arc::new(Metrics::default()), None).await;
     };
@@ -80,6 +76,10 @@ async fn main() -> Result<()> {
             codec: env("COMPRESSION", d.write.codec),
         },
     };
+    let every = Duration::from_secs(env("COMPACT_EVERY_SECS", 300));
+    if !every.is_zero() {
+        tokio::spawn(faster_sync::ingest::compactor(store.clone(), cfg.clone(), every));
+    }
     let ingest = Ingest { store: store.clone(), rpc: rpc.clone(), cfg, stats: metrics.clone() };
     let ingest_task = tokio::spawn(async move {
         let r = ingest.run().await;
@@ -127,8 +127,8 @@ async fn serve(
     let admin_l = tokio::net::TcpListener::bind(admin).await?;
     tracing::info!(%addr, %admin, "listening");
     tokio::spawn(async move { axum::serve(admin_l, api::admin_router(state)).await });
-    let server = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(async {
+    let server =
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         });
     match ingest {

@@ -164,8 +164,17 @@ pub static TRACE_COLS: &[Col] = &[
 /// position (block hash on a tx, …) and are not kept in `extra`.
 const BLOCK_SKIP: &[&str] = &["transactions"];
 const TX_SKIP: &[&str] = &["blockHash", "blockTimestamp"];
-const RECEIPT_SKIP: &[&str] =
-    &["transactionHash", "transactionIndex", "blockHash", "blockNumber", "from", "to", "type", "logs", "blockTimestamp"];
+const RECEIPT_SKIP: &[&str] = &[
+    "transactionHash",
+    "transactionIndex",
+    "blockHash",
+    "blockNumber",
+    "from",
+    "to",
+    "type",
+    "logs",
+    "blockTimestamp",
+];
 const LOG_SKIP: &[&str] = &["topics", "blockHash", "removed", "blockTimestamp"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
@@ -244,7 +253,7 @@ fn json_u64(v: &Value) -> Option<u64> {
         Value::String(s) => {
             let h = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"));
             match h {
-                Some(h) if h.is_empty() => Some(0),
+                Some("") => Some(0),
                 Some(h) => u64::from_str_radix(h, 16).ok(),
                 None => s.parse().ok(),
             }
@@ -368,7 +377,13 @@ impl TableBuilder {
                     b.append_null();
                 } else {
                     let x = parse_hex(s).ok_or_else(bad)?;
-                    let n = if k == H256 { 32 } else if k == Addr { 20 } else { 4 };
+                    let n = if k == H256 {
+                        32
+                    } else if k == Addr {
+                        20
+                    } else {
+                        4
+                    };
                     if x.len() != n {
                         return Err(bad());
                     }
@@ -690,7 +705,9 @@ pub fn cell_json_kind(kind: Kind, a: &dyn Array, row: usize, rpc: bool) -> Value
         }
         Qty => Value::String(qty_hex(a.as_any().downcast_ref::<BinaryArray>().unwrap().value(row))),
         Data => Value::String(hex0x(a.as_any().downcast_ref::<BinaryArray>().unwrap().value(row))),
-        H256 | Addr | Sig => Value::String(hex0x(a.as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap().value(row))),
+        H256 | Addr | Sig => {
+            Value::String(hex0x(a.as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap().value(row)))
+        }
         Json => {
             let s = a.as_any().downcast_ref::<StringArray>().unwrap().value(row);
             serde_json::from_str(s).unwrap_or(Value::Null)
@@ -737,8 +754,7 @@ pub fn rpc_object(t: Table, b: &RecordBatch, row: usize, part: RpcPart) -> Map<S
         o.insert(col.key.to_string(), v);
     }
     if t == Table::Logs {
-        let topics: Vec<Value> =
-            (5..9).map(|i| cell_json(t, b, i, row, true)).take_while(|v| !v.is_null()).collect();
+        let topics: Vec<Value> = (5..9).map(|i| cell_json(t, b, i, row, true)).take_while(|v| !v.is_null()).collect();
         o.insert("topics".into(), Value::Array(topics));
         o.insert("removed".into(), Value::Bool(false));
     }

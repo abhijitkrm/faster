@@ -96,6 +96,10 @@ async fn query_handler(
         Ok(p) => p,
         Err(e) => {
             s.metrics.query_errors.fetch_add(1, Relaxed);
+            if let Some(r) = e.downcast_ref::<query::Reorg>() {
+                return (StatusCode::CONFLICT, Json(json!({"error": r.to_string(), "reorg": true, "block": r.block})))
+                    .into_response();
+            }
             return err(StatusCode::BAD_REQUEST, e);
         }
     };
@@ -257,9 +261,8 @@ async fn stream_arrow(s: Shared, plan: Plan, lz4: bool, t0: Instant) -> Response
         let _ = tx.send(Bytes::from(tail)).await;
         s.metrics.query.observe(t0.elapsed());
     });
-    let stream = futures::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|b| (Ok::<_, std::io::Error>(b), rx))
-    });
+    let stream =
+        futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|b| (Ok::<_, std::io::Error>(b), rx)) });
     let mut resp = Response::new(Body::from_stream(stream));
     resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/vnd.faster-sync.arrow"));
     resp
@@ -356,7 +359,12 @@ pub struct Guard {
 
 impl Guard {
     pub fn new(cfg: GuardConfig, metrics: Arc<Metrics>) -> Arc<Guard> {
-        Arc::new(Guard { cfg, shards: (0..SHARDS).map(|_| Mutex::default()).collect(), hasher: RandomState::new(), metrics })
+        Arc::new(Guard {
+            cfg,
+            shards: (0..SHARDS).map(|_| Mutex::default()).collect(),
+            hasher: RandomState::new(),
+            metrics,
+        })
     }
 
     fn allow(&self, client: &str) -> bool {
