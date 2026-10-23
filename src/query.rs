@@ -385,6 +385,8 @@ pub struct Pred {
     /// Every matching row has one of these values in the table's cluster
     /// column (lets a chunk read only the pages that can hold them).
     pub cluster: Option<Vec<Vec<u8>>>,
+    /// Cheaper necessary condition evaluated first (columns, predicate).
+    pub pre: Option<(Vec<usize>, PredFn)>,
 }
 
 trait Source: Send + Sync {
@@ -432,7 +434,7 @@ impl Source for Chunk {
             }
         }
         let mut f = pred.f;
-        Chunk::read_where(self, t, &gs, cols, sel, &pred.cols, move |b| f(b))
+        Chunk::read_where(self, t, &gs, cols, sel, pred.pre, &pred.cols, move |b| f(b))
     }
 }
 
@@ -498,6 +500,9 @@ struct Ctx<'a> {
     to: u64,
     read: u64,
     skipped: u64,
+    /// For the last `candidates` call: per selection, per field, the
+    /// in-range sub-groups whose filter passes (lower = rarer value).
+    field_hits: Vec<Vec<u64>>,
 }
 
 fn overlaps(r: (u64, u64), from: u64, to: u64) -> bool {
@@ -519,12 +524,22 @@ impl Ctx<'_> {
         join_blocks: Option<&BTreeSet<u64>>,
     ) -> Vec<(usize, Vec<bool>)> {
         let mut out = Vec::new();
+        self.field_hits = sels.iter().map(|s| vec![0; s.fields.len()]).collect();
         for g in 0..self.src.groups(t) {
             let n = self.src.subs(t, g);
             let mut mask = Vec::with_capacity(n);
             let mut any = false;
             for s in 0..n {
                 let r = self.src.sub_range(t, g, s);
+                if overlaps(r, self.from, self.to) {
+                    for (i, sel) in sels.iter().enumerate() {
+                        for (j, f) in sel.fields.iter().enumerate() {
+                            if self.src.may_contain(t, g, s, f.col, &f.keys) {
+                                self.field_hits[i][j] += 1;
+                            }
+                        }
+                    }
+                }
                 let hit = overlaps(r, self.from, self.to)
                     && (all
                         || join_blocks.is_some_and(|b| any_in(b, r))
@@ -598,14 +613,54 @@ impl Ctx<'_> {
             vals.dedup();
             Some(vals)
         });
+        // Rarest value first: a row can only match if, for some selection,
+        // that selection's rarest field (by filter hits) matches. Checking
+        // that column alone first means the other predicate columns are
+        // decoded only for the rows that survive it.
+        // Only worth a separate pass when each selection has a field that
+        // is strictly rarer (fewer filter hits) than another of its fields;
+        // a single-field selection would decode the same column twice.
+        let rare_enough = sels.iter().enumerate().all(|(i, s)| {
+            let h = self.field_hits.get(i);
+            s.fields.len() >= 2 && h.is_some_and(|h| h.iter().min() < h.iter().max())
+        });
+        let pre =
+            (pre_enabled() && !all && rare_enough && join.as_ref().is_none_or(|(k, _)| k.is_empty())).then(|| {
+                let pick: Vec<(&'static str, HashSet<Vec<u8>>)> = sels
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        let j = (0..s.fields.len())
+                            .min_by_key(|j| self.field_hits.get(i).map(|h| h[*j]).unwrap_or(0))
+                            .unwrap();
+                        (s.fields[j].col, s.fields[j].set.clone())
+                    })
+                    .collect();
+                let names: BTreeSet<&'static str> = pick.iter().map(|p| p.0).collect();
+                let f: PredFn = Box::new(move |b: &RecordBatch| {
+                    let cols: Vec<_> = pick.iter().map(|(c, set)| (fixed(b, c).expect("pre column"), set)).collect();
+                    let mut m = BooleanBufferBuilder::new(b.num_rows());
+                    for i in 0..b.num_rows() {
+                        m.append(cols.iter().any(|(a, set)| a.is_valid(i) && contains(set, a.value(i))));
+                    }
+                    Ok(BooleanArray::new(m.finish(), None))
+                });
+                (pos(&names), f)
+            });
         let (sels, keys, from, to) = (sels.clone(), join.map(|j| j.0), self.from, self.to);
         let f = Box::new(move |b: &RecordBatch| mask(t, b, &sels, all, keys.as_deref(), from, to));
-        let mut rows = self.src.read(t, &groups, &pos(&out), Pred { cols: pos(&pred), f, cluster })?;
+        let mut rows = self.src.read(t, &groups, &pos(&out), Pred { cols: pos(&pred), f, cluster, pre })?;
         if crate::chunk::cluster_col(t).is_some() && !rows.is_empty() {
             rows = vec![block_order(t, &rows)?];
         }
         Ok(rows)
     }
+}
+
+/// `QUERY_PRE=0` turns off rarest-field-first evaluation (benchmarks).
+fn pre_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("QUERY_PRE").map_or(true, |v| v != "0"))
 }
 
 /// Rows of a clustered table back in (block, index) order.
@@ -715,7 +770,7 @@ fn block_set(bs: &[RecordBatch], t: Table, into: &mut BTreeSet<u64>) {
 }
 
 fn run_source(plan: &Plan, src: &dyn Source, from: u64, to: u64) -> Result<Part> {
-    let mut c = Ctx { plan, src, from, to, read: 0, skipped: 0 };
+    let mut c = Ctx { plan, src, from, to, read: 0, skipped: 0, field_hits: Vec::new() };
     let mut part = Part::default();
     let join = plan.join;
     let none: Sels = Arc::new(Vec::new());

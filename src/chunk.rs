@@ -150,6 +150,7 @@ impl Chunk {
         row_groups: &[usize],
         cols: &[usize],
         selection: Option<RowSelection>,
+        pre: Option<(Vec<usize>, crate::query::PredFn)>,
         pred_cols: &[usize],
         mut pred: impl FnMut(&RecordBatch) -> anyhow::Result<arrow::array::BooleanArray> + Send + 'static,
     ) -> Result<Vec<RecordBatch>> {
@@ -164,10 +165,18 @@ impl Chunk {
         let p = ArrowPredicateFn::new(pmask, move |b: RecordBatch| {
             pred(&b).map_err(|e| arrow::error::ArrowError::ComputeError(e.to_string()))
         });
+        let mut preds: Vec<Box<dyn parquet::arrow::arrow_reader::ArrowPredicate>> = Vec::new();
+        if let Some((pcols, mut pf)) = pre {
+            let m = ProjectionMask::roots(schema, pcols.iter().copied());
+            preds.push(Box::new(ArrowPredicateFn::new(m, move |b: RecordBatch| {
+                pf(&b).map_err(|e| arrow::error::ArrowError::ComputeError(e.to_string()))
+            })));
+        }
+        preds.push(Box::new(p));
         let mut builder = ParquetRecordBatchReaderBuilder::new_with_metadata(f, meta)
             .with_row_groups(row_groups.to_vec())
             .with_projection(mask)
-            .with_row_filter(RowFilter::new(vec![Box::new(p)]))
+            .with_row_filter(RowFilter::new(preds))
             .with_batch_size(64 * 1024);
         if let Some(sel) = selection {
             builder = builder.with_row_selection(sel);
