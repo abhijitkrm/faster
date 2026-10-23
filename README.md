@@ -63,6 +63,7 @@ cast block-number --rpc-url http://localhost:8545
 | `MAX_BLOCK_RANGE` | 0 (none) | `eth_getLogs` block range limit |
 | `MAX_BATCH` | 100 | calls per batch request |
 | `CACHE_BLOCKS` | 4096 | finalized blocks kept as ready responses |
+| `CACHE_TXS` | 100000 | finalized transactions / receipts kept as ready responses |
 | `BLOCK_TIMESTAMP` | false | add `blockTimestamp` to receipts and logs when the node does not |
 | `API_KEYS` | — | comma-separated keys (`Authorization: Bearer` or `?key=` for WebSocket) |
 | `RATE_LIMIT_RPS` / `RATE_LIMIT_BURST` | 0 (off) / 100 | per key, else per IP |

@@ -23,11 +23,12 @@ pub struct Config {
     /// Add `blockTimestamp` to receipts and logs (as recent geth does).
     pub block_timestamp: bool,
     pub cache_blocks: usize,
+    pub cache_txs: usize,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { max_logs: 10_000, max_block_range: 0, block_timestamp: false, cache_blocks: 4096 }
+        Config { max_logs: 10_000, max_block_range: 0, block_timestamp: false, cache_blocks: 4096, cache_txs: 100_000 }
     }
 }
 
@@ -37,6 +38,8 @@ pub struct Ctx {
     pub cfg: Config,
     /// Final blocks by (number, full transactions), as sent to clients.
     cache: Mutex<lru::LruCache<(u64, bool), Value>>,
+    /// Final transactions and receipts by (method, hash).
+    tx_cache: Mutex<lru::LruCache<(&'static str, String), Value>>,
 }
 
 /// A JSON-RPC error object, or a request to forward the call upstream.
@@ -108,7 +111,14 @@ pub const SERVED: &[&str] = &[
 impl Ctx {
     pub fn new(sync: Arc<Sync>, upstream: Option<Upstream>, cfg: Config) -> Ctx {
         let cap = NonZeroUsize::new(cfg.cache_blocks.max(1)).unwrap();
-        Ctx { sync, upstream, cfg, cache: Mutex::new(lru::LruCache::new(cap)) }
+        let tx_cap = NonZeroUsize::new(cfg.cache_txs.max(1)).unwrap();
+        Ctx {
+            sync,
+            upstream,
+            cfg,
+            cache: Mutex::new(lru::LruCache::new(cap)),
+            tx_cache: Mutex::new(lru::LruCache::new(tx_cap)),
+        }
     }
 
     /// Answers one call: from faster-sync, else upstream, else an error.
@@ -225,22 +235,32 @@ impl Ctx {
             }
             "eth_getTransactionByHash" => {
                 let h = tx_hash(arg(0))?;
+                if let Some(v) = self.cached("tx", &h) {
+                    return Ok(v);
+                }
                 let v = self
                     .sync
                     .query(json!({"from_block": 0, "transactions": [{"hash": [h]}], "join": "blocks"}))
                     .await?;
                 let Some(t) = v["transactions"].get(0) else { return Err(Fail::Forward) };
                 let hash = v["blocks"][0]["hash"].clone();
-                Ok(tx_object(t, &hash))
+                let out = tx_object(t, &hash);
+                self.cache_final("tx", h, &out);
+                Ok(out)
             }
             "eth_getTransactionReceipt" => {
                 let h = tx_hash(arg(0))?;
+                if let Some(v) = self.cached("receipt", &h) {
+                    return Ok(v);
+                }
                 let v =
                     self.sync.query(json!({"from_block": 0, "transactions": [{"hash": [h]}], "join": "all"})).await?;
                 let Some(t) = v["transactions"].get(0) else { return Err(Fail::Forward) };
                 let b = &v["blocks"][0];
                 let logs: Vec<Value> = v["logs"].as_array().cloned().unwrap_or_default();
-                Ok(self.receipt(t, b, logs))
+                let out = self.receipt(t, b, logs);
+                self.cache_final("receipt", h, &out);
+                Ok(out)
             }
             "eth_getBlockReceipts" => {
                 let Some(n) = self.number(self.resolve(arg(0))?).await? else { return Ok(Value::Null) };
@@ -266,6 +286,18 @@ impl Ctx {
             }
             "eth_getLogs" => self.logs(arg(0)).await,
             _ => Err(Fail::Forward),
+        }
+    }
+
+    fn cached(&self, kind: &'static str, hash: &str) -> Option<Value> {
+        self.tx_cache.lock().unwrap().get(&(kind, hash.to_string())).cloned()
+    }
+
+    /// Caches answers about finalized blocks only (they cannot change).
+    fn cache_final(&self, kind: &'static str, hash: String, v: &Value) {
+        let n = v["blockNumber"].as_str().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok());
+        if n.is_some_and(|n| n <= self.sync.heights().finalized) {
+            self.tx_cache.lock().unwrap().put((kind, hash), v.clone());
         }
     }
 
