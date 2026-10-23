@@ -214,7 +214,11 @@ async fn follow(ctx: Arc<Ctx>, sid: String, sel: Option<Value>, out: mpsc::Sende
                         return;
                     }
                 } else {
-                    for l in logs.iter().filter(|l| l["blockNumber"] == b["number"]) {
+                    let min_topics = sel.as_ref().and_then(|s| s["topics"].as_array()).map(|t| t.len()).unwrap_or(0);
+                    for l in logs.iter().filter(|l| {
+                        l["blockNumber"] == b["number"]
+                            && l["topics"].as_array().map(|t| t.len()).unwrap_or(0) >= min_topics
+                    }) {
                         let mut l = l.clone();
                         l["blockHash"] = json!(hash);
                         if out.send(notify(l.clone())).await.is_err() {

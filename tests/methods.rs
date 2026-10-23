@@ -167,6 +167,11 @@ async fn methods() {
         rpc(&u, "eth_getLogs", json!([{"fromBlock": "0x0", "toBlock": "0x5", "address": A}])).await["result"].clone();
     assert_eq!(l.as_array().unwrap().len(), 3);
     assert!(l.as_array().unwrap().iter().all(|x| x["address"] == A && x["blockHash"].is_string()));
+    // Two topic positions: logs need two topics (ours have one).
+    let l = rpc(&u, "eth_getLogs", json!([{"fromBlock": "0x0", "toBlock": "0x1", "topics": [null, null]}])).await
+        ["result"]
+        .clone();
+    assert_eq!(l, json!([]));
     let l = rpc(&u, "eth_getLogs", json!([{"blockHash": h(0xb1)}])).await["result"].clone();
     assert_eq!(l[0]["blockNumber"], "0x1");
     assert_eq!(rpc(&u, "eth_getLogs", json!([{"fromBlock": "0x4", "toBlock": "0x1"}])).await["error"]["code"], -32602);

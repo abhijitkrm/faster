@@ -40,7 +40,7 @@ deep-compares the JSON.
 | Reference | Result |
 |---|---|
 | anvil 1.x, token + ETH + internal-call traffic | 190 / 191 equal (anvil answers a reversed `eth_getLogs` range with `[]`; we answer `invalid block range params` as geth and reth do) |
-| Ethereum mainnet, reth 2.8 (public endpoint) | see [docs/CONFORMANCE.md](docs/CONFORMANCE.md) |
+| Ethereum mainnet, reth 2.8 (public endpoint) | 550 / 550 equal over two runs ([docs/CONFORMANCE.md](docs/CONFORMANCE.md)) |
 
 ```bash
 python3 conformance/conformance.py --node https://reference-node --ours http://localhost:8545 \

@@ -389,6 +389,9 @@ impl Ctx {
             }
             _ => return Err(invalid("invalid address")),
         }
+        // As geth and reth: N topic positions (wildcards included) require a
+        // log to have at least N topics.
+        let min_topics = f.get("topics").and_then(|t| t.as_array()).map(|t| t.len()).unwrap_or(0);
         if let Some(Value::Array(ts)) = f.get("topics") {
             if ts.len() > 4 {
                 return Err(invalid("too many topics"));
@@ -422,6 +425,7 @@ impl Ctx {
         let empty = json!({});
         Ok(Value::Array(
             logs.into_iter()
+                .filter(|l| l["topics"].as_array().map(|t| t.len()).unwrap_or(0) >= min_topics)
                 .map(|l| {
                     let b = blocks.get(l["blockNumber"].as_str().unwrap_or("")).copied().unwrap_or(&empty);
                     self.log_object(l, b)
