@@ -140,7 +140,18 @@ pub static LOG_COLS: &[Col] = &[
     c("topic3", "", H256),
     c("data", "data", Data),
     c("extra", "", Json),
+    // 64-bit hashes of the topics (filter::key): topic filters compare these
+    // 8-byte keys first and check the 32-byte topics only for survivors.
+    c("topic0_key", "", U64),
+    c("topic1_key", "", U64),
+    c("topic2_key", "", U64),
+    c("topic3_key", "", U64),
 ];
+
+/// Internal columns, never returned for `"*"`.
+pub fn hidden(name: &str) -> bool {
+    name.ends_with("_key")
+}
 
 pub static TRACE_COLS: &[Col] = &[
     c("block_number", "", U64),
@@ -395,6 +406,11 @@ impl TableBuilder {
             b.append_value(x)
         }
     }
+    fn put_u64_opt(&mut self, i: usize, x: Option<u64>) {
+        if let ColBuilder::U64(b) = &mut self.cols[i] {
+            b.append_option(x)
+        }
+    }
     fn put_fixed(&mut self, i: usize, x: Option<&[u8]>) {
         let n = match self.table.cols()[i].kind {
             H256 => 32,
@@ -613,6 +629,9 @@ impl Builder {
                 }
                 lt.fill(9..10, &mut l)?;
                 lt.put_extra(10, l, LOG_SKIP);
+                for k in 0..4 {
+                    lt.put_u64_opt(11 + k, topics.get(k).map(|t| crate::filter::key(t)));
+                }
                 lt.rows += 1;
             }
             if let Some(tr) = &traces {

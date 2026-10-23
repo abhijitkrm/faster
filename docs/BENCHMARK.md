@@ -39,10 +39,12 @@ Blocks 26,247,674 – 26,252,637 ingested from a public RPC.
 |---|---:|---:|---:|---:|
 | rare contract (`0x0000…17c6…fecd`) | 14 | **3.6 ms** | 10.6 ms | 5.5 ms |
 | USDT, all logs (3 pages) | 529,869 | **66 ms** | 233 ms | 70 ms |
-| Transfers with topic2 = `0x…01` | 14 | 32.5 ms | 34.1 ms | **6.3 ms** |
+| Transfers with topic2 = `0x…01` | 14 | 32.5 ms¹ | 34.1 ms | **6.3 ms** |
 | every Transfer (14 pages of 200K) | 2,683,819 | 760 ms | 544 ms | **523 ms** |
 
-Where ClickHouse wins:
+¹ v0.1; 5.1 ms from v0.3 (see below).
+
+Where ClickHouse wins (v0.1):
 
 - **topic2 = `0x…01`**: that value appears in 2,010 logs of other events,
   spread over 865 of 1,563 filter sub-groups, so the filters cannot prune
@@ -114,3 +116,22 @@ other columns are decoded only for rows that survive it. Mainnet Transfers
 with topic2 = `0x…01`: 18.5 → 14.6 ms (ClickHouse by address: 6.3 ms; the
 rest is decoding the 32-byte topic column for 2.2M candidate rows).
 Single-field selections are unchanged.
+
+## v0.3.0: topic keys
+
+Each log row also stores a 64-bit hash of each topic (`topic0_key` …
+`topic3_key`, hidden from `"*"`). Topic filters compare these 8-byte keys
+first, column at a time; the 32-byte topics are then checked exactly for the
+rows that survive, so a hash collision can never return a wrong row.
+
+Ethereum mainnet, blocks 26,251,146 – 26,254,102 (3.18M logs), the same rows
+in ClickHouse, HTTP, Arrow, median of 15:
+
+| Transfers with … | v0.2 | v0.3 | CH by block | CH by address |
+|---|---:|---:|---:|---:|
+| topic2 = USDT address (3,327 logs have it, 5 are Transfers) | 17.9 ms | **6.7 ms** | 24.5 ms | 5.8 ms |
+| topic2 = `0x…01` | 12.0 ms | **5.1 ms** | 24.1 ms | 6.2 ms |
+
+Synthetic shapes are unchanged. Cost: 9 bytes per log on mainnet data
+(59.3 → 68.5 bytes per log in `logs.parquet`, +15%). Stores written by
+earlier versions must be rebuilt (store format 2).
