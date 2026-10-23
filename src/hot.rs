@@ -61,6 +61,16 @@ const CFS: [&str; 3] = ["hot", "tx", "bh"];
 
 impl Hot {
     pub fn open(path: &Path) -> Result<Hot> {
+        Self::open_mode(path, false)
+    }
+
+    /// Opens without taking the write lock (serve-only replicas, tools):
+    /// sees the data as of opening.
+    pub fn open_read_only(path: &Path) -> Result<Hot> {
+        Self::open_mode(path, true)
+    }
+
+    fn open_mode(path: &Path, read_only: bool) -> Result<Hot> {
         let mut o = Options::default();
         o.create_if_missing(true);
         o.create_missing_column_families(true);
@@ -80,7 +90,11 @@ impl Hot {
             }
             ColumnFamilyDescriptor::new(*n, co)
         });
-        let db = DB::open_cf_descriptors(&o, path, cfs).context("open hot store")?;
+        let db = if read_only {
+            DB::open_cf_descriptors_read_only(&o, path, cfs, false).context("open hot store read-only")?
+        } else {
+            DB::open_cf_descriptors(&o, path, cfs).context("open hot store")?
+        };
         let mut mem = BTreeMap::new();
         {
             let cf = db.cf_handle("hot").unwrap();

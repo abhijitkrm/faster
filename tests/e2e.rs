@@ -4,7 +4,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use faster_sync::ingest::{Ingest, IngestConfig, WriteOptsCfg};
+use faster_sync::chunk::{Codec, WriteOpts};
+use faster_sync::ingest::{Ingest, IngestConfig};
 use faster_sync::metrics::Metrics;
 use faster_sync::model::{fixed_col, u64_col, Table};
 use faster_sync::query::{self, Join, Limits, LogSel, Plan, Query, TxSel};
@@ -29,7 +30,7 @@ fn cfg() -> IngestConfig {
         hot_max_age: Duration::from_secs(1 << 40),
         poll: Duration::from_millis(20),
         end_block: None,
-        write: WriteOptsCfg { row_group_rows: 1024, zstd_level: 1 },
+        write: WriteOpts { row_group_rows: 1024, codec: Codec::Lz4 },
     }
 }
 
@@ -153,6 +154,11 @@ async fn ingest_query_reorg_restart() {
     wb.dedup();
     assert_eq!(blocks, wb.len());
     assert_eq!(r.next_block, 601);
+    // Chunk-only range whose last units are pruned: still one page.
+    let cend = store.chunk_end().unwrap();
+    let mut q2 = q.clone();
+    q2.to_block = Some(cend);
+    assert_eq!(run(&store, q2).await.next_block, cend);
 
     // Busy contract + Transfer topic, paged.
     let busy = hx(&contract_addr(0));

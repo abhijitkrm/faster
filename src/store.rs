@@ -44,6 +44,16 @@ pub struct View {
 impl Store {
     /// Opens (or creates) the store under `root` for chain `chain_id`.
     pub fn open(root: &Path, chain_id: u64, start_block: u64) -> Result<Store> {
+        Self::open_mode(root, chain_id, start_block, false)
+    }
+
+    /// Opens an existing store for queries only, without locking it.
+    pub fn open_read_only(root: &Path) -> Result<Store> {
+        let m: Meta = serde_json::from_slice(&std::fs::read(root.join("meta.json")).context("meta.json")?)?;
+        Self::open_mode(root, m.chain_id, m.start_block, true)
+    }
+
+    fn open_mode(root: &Path, chain_id: u64, start_block: u64, read_only: bool) -> Result<Store> {
         std::fs::create_dir_all(root)?;
         let mp = root.join("meta.json");
         let meta = if mp.exists() {
@@ -60,10 +70,13 @@ impl Store {
             std::fs::write(&mp, serde_json::to_vec_pretty(&m)?)?;
             m
         };
-        let chunks = ChunkSet::open(root)?;
-        let hot = Hot::open(&root.join("hot"))?;
+        let chunks = if read_only { ChunkSet::open_read_only(root)? } else { ChunkSet::open(root)? };
+        let hot = if read_only { Hot::open_read_only(&root.join("hot"))? } else { Hot::open(&root.join("hot"))? };
         if let (Some(end), Some(first)) = (chunks.end(), hot.first()) {
-            if first < end {
+            if first < end && read_only {
+                // The writer is between publishing a chunk and dropping its
+                // hot rows; queries ignore hot blocks below the chunk end.
+            } else if first < end {
                 // Crash after a chunk was published but before its hot rows
                 // were dropped.
                 hot.drop_before(end)?;

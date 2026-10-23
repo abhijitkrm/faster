@@ -34,19 +34,7 @@ pub struct IngestConfig {
     pub poll: Duration,
     /// Stop after this block (tests, benchmarks).
     pub end_block: Option<u64>,
-    pub write: WriteOptsCfg,
-}
-
-#[derive(Clone, Copy)]
-pub struct WriteOptsCfg {
-    pub row_group_rows: usize,
-    pub zstd_level: i32,
-}
-
-impl WriteOptsCfg {
-    fn opts(self) -> WriteOpts {
-        WriteOpts { row_group_rows: self.row_group_rows, zstd_level: self.zstd_level }
-    }
+    pub write: WriteOpts,
 }
 
 impl Default for IngestConfig {
@@ -62,7 +50,7 @@ impl Default for IngestConfig {
             hot_max_age: Duration::from_secs(3600),
             poll: Duration::from_millis(250),
             end_block: None,
-            write: WriteOptsCfg { row_group_rows: 32 * 1024, zstd_level: 1 },
+            write: WriteOpts::default(),
         }
     }
 }
@@ -208,7 +196,7 @@ impl Ingest {
                     self.store.publish(p.await??);
                     self.store.notify();
                 }
-                let (store, last, opts, stats) = (self.store.clone(), prev.unwrap(), self.cfg.write.opts(), stats.clone());
+                let (store, last, opts, stats) = (self.store.clone(), prev.unwrap(), self.cfg.write, stats.clone());
                 pending = Some(tokio::task::spawn_blocking(move || {
                     let t = Instant::now();
                     let b = Batches::concat(&all);
@@ -321,7 +309,7 @@ impl Ingest {
         let blocks = self.store.hot.range(first, to);
         let Some(last) = blocks.last().map(|b| b.head) else { return Ok(()) };
         let end = last.number + 1;
-        let (store, opts, stats) = (self.store.clone(), self.cfg.write.opts(), self.stats.clone());
+        let (store, opts, stats) = (self.store.clone(), self.cfg.write, self.stats.clone());
         tokio::task::spawn_blocking(move || -> Result<()> {
             let t = Instant::now();
             let parts: Vec<Batches> = blocks.iter().map(|b| b.batches.clone()).collect();

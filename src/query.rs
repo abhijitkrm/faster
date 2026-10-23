@@ -143,6 +143,7 @@ impl Default for Limits {
 
 type Set = Option<HashSet<Vec<u8>>>;
 
+#[derive(Clone)]
 struct CField {
     col: &'static str,
     set: HashSet<Vec<u8>>,
@@ -150,6 +151,7 @@ struct CField {
 }
 
 /// One selection: every field must match.
+#[derive(Clone)]
 struct CSel {
     fields: Vec<CField>,
     status: Option<u64>,
@@ -196,13 +198,15 @@ fn field<const N: usize>(out: &mut Vec<CField>, col: &'static str, v: &[String])
     Ok(())
 }
 
+type Sels = Arc<Vec<CSel>>;
+
 pub struct Plan {
     from: u64,
     to: u64,
-    logs: Vec<CSel>,
-    txs: Vec<CSel>,
-    traces: Vec<CSel>,
-    blocks: Vec<CSel>,
+    logs: Sels,
+    txs: Sels,
+    traces: Sels,
+    blocks: Sels,
     include_all_blocks: bool,
     join: Join,
     out_cols: [Vec<&'static str>; 4],
@@ -320,10 +324,10 @@ impl Plan {
         Ok(Plan {
             from: q.from_block,
             to,
-            logs,
-            txs,
-            traces,
-            blocks,
+            logs: Arc::new(logs),
+            txs: Arc::new(txs),
+            traces: Arc::new(traces),
+            blocks: Arc::new(blocks),
             include_all_blocks: q.include_all_blocks,
             join: q.join,
             out_cols,
@@ -336,32 +340,64 @@ impl Plan {
 
 // ── data sources: a chunk, or the hot blocks ────────────────────────────
 
+/// Row predicate evaluated on the predicate columns of a batch.
+pub struct Pred {
+    pub cols: Vec<usize>,
+    pub f: Box<dyn FnMut(&RecordBatch) -> Result<BooleanArray> + Send>,
+    /// Every matching row has one of these values in the table's cluster
+    /// column (lets a chunk read only the pages that can hold them).
+    pub cluster: Option<Vec<Vec<u8>>>,
+}
+
 trait Source: Send + Sync {
-    /// Row groups of table `t`: (min block, max block), or None if unknown.
     fn groups(&self, t: Table) -> usize;
-    fn group_range(&self, t: Table, g: usize) -> (u64, u64);
-    /// Might group `g` contain a row with value key `k` in column `col`?
-    fn may_contain(&self, t: Table, g: usize, col: &str, keys: &[u64]) -> bool;
-    fn read(&self, t: Table, groups: &[usize], cols: &[usize]) -> Result<Vec<RecordBatch>>;
+    fn subs(&self, t: Table, g: usize) -> usize;
+    /// (min block, max block) of sub-group `s` of row group `g`.
+    fn sub_range(&self, t: Table, g: usize, s: usize) -> (u64, u64);
+    /// Might sub-group `s` hold a row whose `col` value has one of `keys`?
+    fn may_contain(&self, t: Table, g: usize, s: usize, col: &str, keys: &[u64]) -> bool;
+    /// Rows of the marked sub-groups of `groups` that pass `pred`, columns
+    /// `cols` (ascending).
+    fn read(&self, t: Table, groups: &[(usize, Vec<bool>)], cols: &[usize], pred: Pred) -> Result<Vec<RecordBatch>>;
 }
 
 impl Source for Chunk {
     fn groups(&self, t: Table) -> usize {
         self.index.tables[t.idx()].row_groups.len()
     }
-    fn group_range(&self, t: Table, g: usize) -> (u64, u64) {
-        let r = &self.index.tables[t.idx()].row_groups[g];
+    fn subs(&self, t: Table, g: usize) -> usize {
+        self.index.tables[t.idx()].row_groups[g].subs.len()
+    }
+    fn sub_range(&self, t: Table, g: usize, s: usize) -> (u64, u64) {
+        let r = &self.index.tables[t.idx()].row_groups[g].subs[s];
         (r.min_block, r.max_block)
     }
-    fn may_contain(&self, t: Table, g: usize, col: &str, keys: &[u64]) -> bool {
-        let r = &self.index.tables[t.idx()].row_groups[g];
+    fn may_contain(&self, t: Table, g: usize, s: usize, col: &str, keys: &[u64]) -> bool {
+        let r = &self.index.tables[t.idx()].row_groups[g].subs[s];
         match filtered_cols(t).iter().position(|c| *c == col) {
             Some(i) => r.filters[i].any(keys),
             None => true,
         }
     }
-    fn read(&self, t: Table, groups: &[usize], cols: &[usize]) -> Result<Vec<RecordBatch>> {
-        Chunk::read(self, t, groups, cols)
+    fn read(&self, t: Table, groups: &[(usize, Vec<bool>)], cols: &[usize], pred: Pred) -> Result<Vec<RecordBatch>> {
+        let gs: Vec<usize> = groups.iter().map(|g| g.0).collect();
+        let masks: Vec<Vec<bool>> = groups.iter().map(|g| g.1.clone()).collect();
+        let mut sel = if masks.iter().all(|m| m.iter().all(|x| *x)) {
+            None
+        } else {
+            Some(self.sub_selection(t, &gs, &masks))
+        };
+        if let (Some(vals), Some(c)) = (&pred.cluster, crate::chunk::cluster_col(t)) {
+            let v: Vec<&[u8]> = vals.iter().map(|v| v.as_slice()).collect();
+            if let Some(p) = self.page_selection(t, &gs, t.col_index(c).unwrap(), &v) {
+                sel = Some(match sel {
+                    Some(s) => s.intersection(&p),
+                    None => p,
+                });
+            }
+        }
+        let mut f = pred.f;
+        Chunk::read_where(self, t, &gs, cols, sel, &pred.cols, move |b| f(b))
     }
 }
 
@@ -383,14 +419,20 @@ impl Source for HotSource {
     fn groups(&self, t: Table) -> usize {
         usize::from(self.batches.get(t).num_rows() > 0)
     }
-    fn group_range(&self, t: Table, _g: usize) -> (u64, u64) {
+    fn subs(&self, _t: Table, _g: usize) -> usize {
+        1
+    }
+    fn sub_range(&self, t: Table, _g: usize, _s: usize) -> (u64, u64) {
         self.ranges[t.idx()]
     }
-    fn may_contain(&self, _t: Table, _g: usize, _col: &str, _keys: &[u64]) -> bool {
+    fn may_contain(&self, _t: Table, _g: usize, _s: usize, _col: &str, _keys: &[u64]) -> bool {
         true
     }
-    fn read(&self, t: Table, _groups: &[usize], cols: &[usize]) -> Result<Vec<RecordBatch>> {
-        Ok(vec![self.batches.get(t).project(cols)?])
+    fn read(&self, t: Table, _groups: &[(usize, Vec<bool>)], cols: &[usize], mut pred: Pred) -> Result<Vec<RecordBatch>> {
+        let b = self.batches.get(t);
+        let _ = pred.cluster;
+        let m = (pred.f)(&b.project(&pred.cols)?)?;
+        Ok(vec![filter_record_batch(&b.project(cols)?, &m)?])
     }
 }
 
@@ -428,68 +470,115 @@ fn any_in(set: &BTreeSet<u64>, r: (u64, u64)) -> bool {
 impl Ctx<'_> {
     /// Row groups of `t` that may hold a row matching a selection, or a
     /// joined key in `join_blocks`.
-    fn candidates(&mut self, t: Table, sels: &[CSel], all: bool, join_blocks: Option<&BTreeSet<u64>>) -> Vec<usize> {
+    fn candidates(
+        &mut self,
+        t: Table,
+        sels: &[CSel],
+        all: bool,
+        join_blocks: Option<&BTreeSet<u64>>,
+    ) -> Vec<(usize, Vec<bool>)> {
         let mut out = Vec::new();
         for g in 0..self.src.groups(t) {
-            let r = self.src.group_range(t, g);
-            if !overlaps(r, self.from, self.to) {
-                continue;
+            let n = self.src.subs(t, g);
+            let mut mask = Vec::with_capacity(n);
+            let mut any = false;
+            for s in 0..n {
+                let r = self.src.sub_range(t, g, s);
+                let hit = overlaps(r, self.from, self.to)
+                    && (all
+                        || join_blocks.is_some_and(|b| any_in(b, r))
+                        || sels.iter().any(|sel| {
+                            sel.blocks.as_ref().is_none_or(|b| any_in(b, r))
+                                && sel.fields.iter().all(|f| self.src.may_contain(t, g, s, &f.col, &f.keys))
+                        }));
+                if hit {
+                    self.read += 1;
+                } else if overlaps(r, self.from, self.to) {
+                    self.skipped += 1;
+                }
+                any |= hit;
+                mask.push(hit);
             }
-            let hit = all
-                || join_blocks.is_some_and(|b| any_in(b, r))
-                || sels.iter().any(|s| {
-                    s.blocks.as_ref().is_none_or(|b| any_in(b, r))
-                        && s.fields.iter().all(|f| self.src.may_contain(t, g, f.col, &f.keys))
-                });
-            if hit {
-                out.push(g);
-            } else {
-                self.skipped += 1;
+            if any {
+                out.push((g, mask));
             }
         }
-        self.read += out.len() as u64;
         out
     }
 
     /// Reads candidate groups of `t` and keeps rows that match a selection
     /// (or all rows when `all`) or whose (block, tx index) is in `join`.
-    fn scan(
-        &mut self,
-        t: Table,
-        sels: &[CSel],
-        all: bool,
-        join: Option<(&TxKeys, &BTreeSet<u64>)>,
-        extra_cols: &[&'static str],
-    ) -> Result<Vec<RecordBatch>> {
-        if !all && sels.is_empty() && join.is_none_or(|(k, _)| k.is_empty()) {
+    /// Only the predicate columns are decoded for rows that do not match.
+    fn scan(&mut self, t: Table, sels: &Sels, all: bool, join: Option<(Arc<TxKeys>, &BTreeSet<u64>)>) -> Result<Vec<RecordBatch>> {
+        if !all && sels.is_empty() && join.as_ref().is_none_or(|(k, _)| k.is_empty()) {
             return Ok(Vec::new());
         }
-        let groups = self.candidates(t, sels, all, join.map(|j| j.1));
+        let groups = self.candidates(t, sels, all, join.as_ref().map(|j| j.1));
         if groups.is_empty() {
             return Ok(Vec::new());
         }
-        let mut need: BTreeSet<&'static str> = self.plan.out_cols[t.idx()].iter().copied().collect();
-        need.insert(t.block_col());
-        need.extend(extra_cols.iter().copied());
-        for s in sels {
-            s.needs(&mut need, t);
+        let mut out: BTreeSet<&'static str> = self.plan.out_cols[t.idx()].iter().copied().collect();
+        out.insert(t.block_col());
+        if t != Table::Blocks {
+            out.insert("transaction_index");
         }
-        if join.is_some() || t != Table::Blocks {
-            if t != Table::Blocks {
-                need.insert("transaction_index");
+        if t == Table::Logs {
+            out.insert("log_index");
+        }
+        let mut pred: BTreeSet<&'static str> = BTreeSet::new();
+        pred.insert(t.block_col());
+        if join.is_some() {
+            pred.insert("transaction_index");
+        }
+        for s in sels.iter() {
+            s.needs(&mut pred, t);
+        }
+        let pos = |set: &BTreeSet<&'static str>| -> Vec<usize> {
+            t.cols().iter().enumerate().filter(|(_, c)| set.contains(c.name)).map(|(i, _)| i).collect()
+        };
+        // If every selection pins the cluster column and nothing else can
+        // match, only pages holding those values need reading.
+        let cluster = crate::chunk::cluster_col(t).and_then(|c| {
+            let no_join = join.as_ref().is_none_or(|(k, _)| k.is_empty());
+            if all || !no_join || sels.is_empty() {
+                return None;
             }
-        }
-        let idx: Vec<usize> = t.cols().iter().enumerate().filter(|(_, c)| need.contains(c.name)).map(|(i, _)| i).collect();
-        let mut out = Vec::new();
-        for b in self.src.read(t, &groups, &idx)? {
-            let mask = mask(t, &b, sels, all, join.map(|j| j.0), self.from, self.to)?;
-            let f = filter_record_batch(&b, &mask)?;
-            if f.num_rows() > 0 {
-                out.push(f);
+            let mut vals = Vec::new();
+            for s in sels.iter() {
+                vals.extend(s.fields.iter().find(|f| f.col == c)?.set.iter().cloned());
             }
+            vals.sort();
+            vals.dedup();
+            Some(vals)
+        });
+        let (sels, keys, from, to) = (sels.clone(), join.map(|j| j.0), self.from, self.to);
+        let f = Box::new(move |b: &RecordBatch| mask(t, b, &sels, all, keys.as_deref(), from, to));
+        let mut rows = self.src.read(t, &groups, &pos(&out), Pred { cols: pos(&pred), f, cluster })?;
+        if crate::chunk::cluster_col(t).is_some() && !rows.is_empty() {
+            rows = vec![block_order(t, &rows)?];
         }
-        Ok(out)
+        Ok(rows)
     }
+}
+
+/// Rows of a clustered table back in (block, index) order.
+fn block_order(t: Table, rows: &[RecordBatch]) -> Result<RecordBatch> {
+    use arrow::compute::{concat_batches, take_record_batch};
+    let b = concat_batches(&rows[0].schema(), rows)?;
+    let idx_col = if t == Table::Logs { "log_index" } else { "transaction_index" };
+    let (bn, ix) = (u64s(&b, t.block_col()).unwrap(), u64s(&b, idx_col).unwrap());
+    // One u64 key per row: (block, index) packed, then an unstable sort of
+    // (key, position) pairs; much cheaper than a two-column lexsort.
+    let lo = bn.values().iter().min().copied().unwrap_or(0);
+    let mut keyed: Vec<(u64, u32)> = (0..b.num_rows())
+        .map(|i| (((bn.value(i) - lo) << 24) | ix.value(i).min((1 << 24) - 1), i as u32))
+        .collect();
+    if keyed.windows(2).all(|w| w[0].0 <= w[1].0) {
+        return Ok(b);
+    }
+    keyed.sort_unstable();
+    let idx = UInt32Array::from_iter_values(keyed.into_iter().map(|(_, i)| i));
+    Ok(take_record_batch(&b, &idx)?)
 }
 
 fn fixed<'a>(b: &'a RecordBatch, n: &str) -> Option<&'a FixedSizeBinaryArray> {
@@ -535,6 +624,7 @@ fn mask(
             blocks: s.blocks.as_ref(),
         });
     }
+    // Single-value fields compare bytes directly instead of hashing.
     let mut m = BooleanBufferBuilder::new(b.num_rows());
     for i in 0..b.num_rows() {
         let bn = blocks.value(i);
@@ -551,15 +641,23 @@ fn mask(
         if !hit {
             hit = rs.iter().any(|r| {
                 r.blocks.is_none_or(|s| s.contains(&bn))
-                    && r.fields.iter().all(|(a, set)| a.is_valid(i) && set.contains(a.value(i)))
+                    && r.fields.iter().all(|(a, set)| a.is_valid(i) && contains(set, a.value(i)))
                     && r.status.is_none_or(|(a, v)| a.is_valid(i) && a.value(i) == v)
                     && r.types.is_none_or(|(a, set)| a.is_valid(i) && set.contains(a.value(i)))
-                    && r.hashes.is_none_or(|(a, set)| a.is_valid(i) && set.contains(a.value(i)))
+                    && r.hashes.is_none_or(|(a, set)| a.is_valid(i) && contains(set, a.value(i)))
             });
         }
         m.append(hit);
     }
     Ok(BooleanArray::new(m.finish(), None))
+}
+
+#[inline]
+fn contains(set: &HashSet<Vec<u8>>, v: &[u8]) -> bool {
+    if set.len() == 1 {
+        return set.iter().next().is_some_and(|x| x.as_slice() == v);
+    }
+    set.contains(v)
 }
 
 fn keys_of(bs: &[RecordBatch], t: Table) -> (TxKeys, BTreeSet<u64>) {
@@ -587,23 +685,25 @@ fn run_source(plan: &Plan, src: &dyn Source, from: u64, to: u64) -> Result<Part>
     let mut c = Ctx { plan, src, from, to, read: 0, skipped: 0 };
     let mut part = Part::default();
     let join = plan.join;
+    let none: Sels = Arc::new(Vec::new());
 
     // 1. Transactions selected by their own fields (needed first for join=all).
     let tx_sel = if join == Join::All && !plan.txs.is_empty() {
-        c.scan(Table::Transactions, &plan.txs, false, None, &[])?
+        c.scan(Table::Transactions, &plan.txs, false, None)?
     } else {
         Vec::new()
     };
     let (tx_sel_keys, tx_sel_blocks) = keys_of(&tx_sel, Table::Transactions);
-    let tx_join = (join == Join::All).then_some((&tx_sel_keys, &tx_sel_blocks));
+    let tx_sel_keys = Arc::new(tx_sel_keys);
+    let tx_join = || (join == Join::All).then(|| (tx_sel_keys.clone(), &tx_sel_blocks));
 
     // 2. Logs and traces: own selections, plus (join=all) rows of selected txs.
-    let logs = c.scan(Table::Logs, &plan.logs, false, tx_join, &[])?;
-    let traces = c.scan(Table::Traces, &plan.traces, false, tx_join, &[])?;
+    let logs = c.scan(Table::Logs, &plan.logs, false, tx_join())?;
+    let traces = c.scan(Table::Traces, &plan.traces, false, tx_join())?;
 
     // 3. Transactions: own selections, plus the tx of every log/trace.
     let txs = if join == Join::Nothing {
-        c.scan(Table::Transactions, &plan.txs, false, None, &[])?
+        c.scan(Table::Transactions, &plan.txs, false, None)?
     } else {
         let (mut k, mut bs) = keys_of(&logs, Table::Logs);
         let (k2, b2) = keys_of(&traces, Table::Traces);
@@ -613,15 +713,15 @@ fn run_source(plan: &Plan, src: &dyn Source, from: u64, to: u64) -> Result<Part>
             // Already selected: keep them without re-reading.
             k.extend(tx_sel_keys.iter().copied());
             bs.extend(tx_sel_blocks.iter().copied());
-            c.scan(Table::Transactions, &[], false, Some((&k, &bs)), &[])?
+            c.scan(Table::Transactions, &none, false, Some((Arc::new(k), &bs)))?
         } else {
-            c.scan(Table::Transactions, &plan.txs, false, Some((&k, &bs)), &[])?
+            c.scan(Table::Transactions, &plan.txs, false, Some((Arc::new(k), &bs)))?
         }
     };
 
     // 4. Block headers.
     let blocks = if plan.include_all_blocks {
-        c.scan(Table::Blocks, &[], true, None, &[])?
+        c.scan(Table::Blocks, &none, true, None)?
     } else {
         let mut bs = BTreeSet::new();
         if join != Join::Nothing {
@@ -629,7 +729,7 @@ fn run_source(plan: &Plan, src: &dyn Source, from: u64, to: u64) -> Result<Part>
             block_set(&traces, Table::Traces, &mut bs);
             block_set(&txs, Table::Transactions, &mut bs);
         }
-        let sel = c.scan(Table::Blocks, &plan.blocks, false, None, &[])?;
+        let sel = c.scan(Table::Blocks, &plan.blocks, false, None)?;
         if bs.is_empty() {
             sel
         } else {
@@ -637,7 +737,7 @@ fn run_source(plan: &Plan, src: &dyn Source, from: u64, to: u64) -> Result<Part>
             // a block-number predicate.
             block_set(&sel, Table::Blocks, &mut bs);
             let pseudo = CSel { fields: vec![], status: None, call_types: None, blocks: Some(bs), hashes: None };
-            c.scan(Table::Blocks, std::slice::from_ref(&pseudo), false, None, &[])?
+            c.scan(Table::Blocks, &Arc::new(vec![pseudo]), false, None)?
         }
     };
 
@@ -645,6 +745,9 @@ fn run_source(plan: &Plan, src: &dyn Source, from: u64, to: u64) -> Result<Part>
         let cols = &plan.out_cols[t.idx()];
         let mut out = Vec::with_capacity(v.len());
         for b in v {
+            if b.num_rows() == 0 {
+                continue;
+            }
             let idx: Vec<usize> = cols.iter().map(|n| b.schema().index_of(n)).collect::<Result<_, _>>()?;
             let p = b.project(&idx)?;
             part.rows += p.num_rows();
@@ -705,13 +808,20 @@ fn overflow_block(part: &Part, budget: usize) -> Option<u64> {
     if part.rows <= budget {
         return None;
     }
+    // Rows are in block order within each batch: count runs, not rows.
     let mut counts: std::collections::BTreeMap<u64, usize> = Default::default();
     for t in TABLES {
         for b in &part.tables[t.idx()] {
-            if let Some(bn) = u64s(b, t.block_col()) {
-                for x in bn.values() {
-                    *counts.entry(*x).or_default() += 1;
+            let Some(bn) = u64s(b, t.block_col()) else { continue };
+            let v = bn.values();
+            let mut i = 0;
+            while i < v.len() {
+                let mut j = i + 1;
+                while j < v.len() && v[j] == v[i] {
+                    j += 1;
                 }
+                *counts.entry(v[i]).or_default() += j - i;
+                i = j;
             }
         }
     }
@@ -725,7 +835,46 @@ fn overflow_block(part: &Part, budget: usize) -> Option<u64> {
     None
 }
 
+/// Row groups of the largest table per work unit.
+const SLICE_GROUPS: usize = 2;
+
+/// Could any selection match a row of `c` in blocks `[a, b)`? Joined rows
+/// only follow selected ones, so no selected row means an empty unit.
+fn unit_may_match(plan: &Plan, c: &Chunk, a: u64, b: u64) -> bool {
+    if plan.include_all_blocks {
+        return true;
+    }
+    let tabs = [(Table::Logs, &plan.logs), (Table::Transactions, &plan.txs), (Table::Traces, &plan.traces), (Table::Blocks, &plan.blocks)];
+    tabs.iter().any(|(t, sels)| {
+        !sels.is_empty()
+            && (0..c.groups(*t)).any(|g| {
+                (0..c.subs(*t, g)).any(|s| {
+                    let r = c.sub_range(*t, g, s);
+                    overlaps(r, a, b)
+                        && sels.iter().any(|sel| {
+                            sel.blocks.as_ref().is_none_or(|bs| any_in(bs, r))
+                                && sel.fields.iter().all(|f| c.may_contain(*t, g, s, f.col, &f.keys))
+                        })
+                })
+            })
+    })
+}
+
+/// Encodes a part's rows (Arrow frames) on the worker that produced them.
+pub type Encoder = Arc<dyn Fn(&[Vec<RecordBatch>; 4]) -> Result<bytes::Bytes> + Send + Sync>;
+
+/// Where result rows go: collected into the Response, or encoded per part
+/// and sent as they are ready (in block order).
+pub enum Output {
+    Collect,
+    Stream { enc: Encoder, tx: tokio::sync::mpsc::Sender<bytes::Bytes> },
+}
+
 pub async fn execute(store: Arc<Store>, plan: Plan, metrics: &Metrics) -> Result<Response> {
+    execute_to(store, plan, metrics, Output::Collect).await
+}
+
+pub async fn execute_to(store: Arc<Store>, plan: Plan, metrics: &Metrics, out: Output) -> Result<Response> {
     let t0 = Instant::now();
     let plan = Arc::new(plan);
     let (from, to) = (plan.from, plan.to);
@@ -734,49 +883,93 @@ pub async fn execute(store: Arc<Store>, plan: Plan, metrics: &Metrics) -> Result
     let mut rows = 0usize;
     let mut next = from;
     let mut done = false;
+    let enc = match &out {
+        Output::Stream { enc, .. } => Some(enc.clone()),
+        Output::Collect => None,
+    };
 
-    let mut tasks = futures::stream::iter(view.chunks.clone())
-        .map(|c| {
-            let plan = plan.clone();
+    // Work units: row-group-sized block slices of each chunk, so a page
+    // that fills its budget early wastes little parallel work.
+    let units: Vec<(Arc<Chunk>, u64, u64)> = view
+        .chunks
+        .iter()
+        .flat_map(|c| {
+            let (a, b) = (from.max(c.from_block()), to.min(c.to_block()));
+            c.slices(a, b, SLICE_GROUPS).into_iter().map(move |(x, y)| (c.clone(), x, y))
+        })
+        .collect();
+    // Skip units whose filters rule out every selection without spawning
+    // work for them (selective queries touch few units).
+    let units: Vec<_> = units.into_iter().filter(|(c, a, b)| unit_may_match(&plan, c.as_ref(), *a, *b)).collect();
+    let mut tasks = futures::stream::iter(units)
+        .map(|(c, a, b)| {
+            let (plan, enc) = (plan.clone(), enc.clone());
             tokio::task::spawn_blocking(move || {
-                let (a, b) = (plan.from.max(c.from_block()), plan.to.min(c.to_block()));
-                run_source(&plan, c.as_ref(), a, b).map(|p| (p, b))
+                let p = run_source(&plan, c.as_ref(), a, b)?;
+                let bytes = match &enc {
+                    Some(e) if p.rows > 0 => Some(e(&p.tables)?),
+                    _ => None,
+                };
+                Ok::<_, anyhow::Error>((p, b, bytes))
             })
         })
         .buffered(plan.parallelism);
 
-    let mut take = |mut part: Part, end: u64, rows: &mut usize, next: &mut u64| -> bool {
+    // Accepts a finished part in order; true when the page is full.
+    let mut take = async |mut part: Part, end: u64, bytes: Option<bytes::Bytes>, rows: &mut usize, next: &mut u64| -> Result<bool> {
         metrics.row_groups_read.fetch_add(part.groups_read, std::sync::atomic::Ordering::Relaxed);
         metrics.row_groups_skipped.fetch_add(part.groups_skipped, std::sync::atomic::Ordering::Relaxed);
         let budget = plan.max_rows.saturating_sub(*rows);
         let mut stop = false;
         let mut end = end;
+        let mut bytes = bytes;
         if let Some(e) = overflow_block(&part, budget) {
             // Always return at least one block's rows.
             let e = if *rows == 0 && e == *next { e + 1 } else { e };
             if e <= *next {
-                return true;
+                return Ok(true);
             }
             cut(&mut part, e);
             end = e;
             stop = true;
+            bytes = None;
         }
-        for t in TABLES {
-            tables[t.idx()].append(&mut part.tables[t.idx()]);
+        match &out {
+            Output::Collect => {
+                for t in TABLES {
+                    tables[t.idx()].append(&mut part.tables[t.idx()]);
+                }
+            }
+            Output::Stream { enc, tx } => {
+                if part.rows > 0 {
+                    let b = match bytes {
+                        Some(b) => b,
+                        None => enc(&part.tables)?,
+                    };
+                    tx.send(b).await.map_err(|_| anyhow!("client went away"))?;
+                }
+            }
         }
         *rows += part.rows;
         *next = end;
-        stop || Instant::now() >= plan.deadline
+        Ok(stop || Instant::now() >= plan.deadline)
     };
 
     while let Some(r) = tasks.next().await {
-        let (part, end) = r??;
-        if take(part, end, &mut rows, &mut next) {
+        let (part, end, bytes) = r??;
+        if take(part, end, bytes, &mut rows, &mut next).await? {
             done = true;
             break;
         }
     }
     drop(tasks);
+    if !done {
+        // Units after the last one processed may have been pruned: the page
+        // still covers every chunk in range.
+        if let Some(c) = view.chunks.last() {
+            next = next.max(to.min(c.to_block()));
+        }
+    }
     let mut last_block = None;
     if !done && !view.hot.is_empty() {
         let hot = view.hot.clone();
@@ -787,7 +980,7 @@ pub async fn execute(store: Arc<Store>, plan: Plan, metrics: &Metrics) -> Result
             run_source(&plan2, &src, a, b)
         })
         .await??;
-        take(part, view.end, &mut rows, &mut next);
+        take(part, view.end, None, &mut rows, &mut next).await?;
     }
     if let Some(h) = view.hot.iter().find(|b| b.head.number + 1 == next) {
         last_block = Some(Guard { block_number: h.head.number, hash: crate::model::hex0x(&h.head.hash) });

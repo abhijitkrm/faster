@@ -14,7 +14,9 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use arrow::array::{Array, FixedSizeBinaryArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder};
+use parquet::arrow::arrow_reader::{
+    ArrowPredicateFn, ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowFilter, RowSelection,
+};
 use parquet::arrow::{ArrowWriter, ProjectionMask};
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
@@ -25,14 +27,26 @@ use crate::model::{Batches, BlockHead, Table, TABLES};
 
 const INDEX_MAGIC: &[u8; 8] = b"FSYNIDX1";
 
+/// A run of `SUB_ROWS` rows of a row group (page aligned): the unit of
+/// filtering, so a hit decodes a few pages rather than a whole row group.
 #[derive(Serialize, Deserialize)]
-pub struct RowGroupIndex {
-    pub rows: u64,
+pub struct SubIndex {
+    pub rows: u32,
     pub min_block: u64,
     pub max_block: u64,
     /// One filter per entry of `filtered_cols(table)`.
     pub filters: Vec<Filter>,
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct RowGroupIndex {
+    pub rows: u64,
+    pub min_block: u64,
+    pub max_block: u64,
+    pub subs: Vec<SubIndex>,
+}
+
+pub const SUB_ROWS: usize = 4096;
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct TableIndex {
@@ -51,7 +65,13 @@ pub struct ChunkIndex {
 
 impl ChunkIndex {
     pub fn filter_bytes(&self) -> usize {
-        self.tables.iter().flat_map(|t| &t.row_groups).flat_map(|g| &g.filters).map(|f| f.bytes()).sum()
+        self.tables
+            .iter()
+            .flat_map(|t| &t.row_groups)
+            .flat_map(|g| &g.subs)
+            .flat_map(|s| &s.filters)
+            .map(|f| f.bytes())
+            .sum()
     }
 }
 
@@ -60,6 +80,9 @@ pub struct Chunk {
     pub index: ChunkIndex,
     /// Parquet footers, parsed once.
     meta: [ArrowReaderMetadata; 4],
+    /// The table files, memory-mapped once (reads are then plain memory
+    /// accesses: no per-page open/seek/close).
+    files: [bytes::Bytes; 4],
 }
 
 impl Chunk {
@@ -78,11 +101,138 @@ impl Chunk {
         }
         let index: ChunkIndex = bincode::deserialize(&buf[8..]).context("index.bin")?;
         let mut meta = Vec::with_capacity(4);
+        let mut files = Vec::with_capacity(4);
         for t in TABLES {
             let f = File::open(dir.join(format!("{}.parquet", t.name())))?;
-            meta.push(ArrowReaderMetadata::load(&f, ArrowReaderOptions::new())?);
+            // Safety: chunk files are immutable once published and are only
+            // ever deleted (never truncated) after being replaced.
+            let map = unsafe { memmap2::Mmap::map(&f)? };
+            let f = bytes::Bytes::from_owner(map);
+            files.push(f.clone());
+            meta.push(ArrowReaderMetadata::load(
+                &f,
+                ArrowReaderOptions::new().with_page_index_policy(parquet::file::metadata::PageIndexPolicy::Optional),
+            )?);
         }
-        Ok(Chunk { dir: dir.to_path_buf(), index, meta: meta.try_into().ok().unwrap() })
+        Ok(Chunk {
+            dir: dir.to_path_buf(),
+            index,
+            meta: meta.try_into().ok().unwrap(),
+            files: files.try_into().ok().unwrap(),
+        })
+    }
+
+    /// Block slices of `[from, to)` that each cover about `groups` row
+    /// groups of the chunk's largest table.
+    pub fn slices(&self, from: u64, to: u64, groups: usize) -> Vec<(u64, u64)> {
+        let t = self.index.tables.iter().max_by_key(|t| t.rows).expect("tables");
+        let mut cuts: Vec<u64> = t
+            .row_groups
+            .iter()
+            .step_by(groups.max(1))
+            .map(|g| g.min_block)
+            .filter(|b| *b > from && *b < to)
+            .collect();
+        cuts.dedup();
+        let mut out = Vec::with_capacity(cuts.len() + 1);
+        let mut a = from;
+        for c in cuts {
+            out.push((a, c));
+            a = c;
+        }
+        if a < to {
+            out.push((a, to));
+        }
+        out
+    }
+
+    /// Reads rows of `row_groups` of table `t` that pass `pred` (evaluated
+    /// on the `pred_cols` columns only), returning the `cols` columns.
+    /// Columns outside `pred_cols` are decoded only for passing rows.
+    pub fn read_where(
+        &self,
+        t: Table,
+        row_groups: &[usize],
+        cols: &[usize],
+        selection: Option<RowSelection>,
+        pred_cols: &[usize],
+        mut pred: impl FnMut(&RecordBatch) -> anyhow::Result<arrow::array::BooleanArray> + Send + 'static,
+    ) -> Result<Vec<RecordBatch>> {
+        if row_groups.is_empty() {
+            return Ok(Vec::new());
+        }
+        let f = self.files[t.idx()].clone();
+        let meta = self.meta[t.idx()].clone();
+        let schema = meta.parquet_schema();
+        let mask = ProjectionMask::roots(schema, cols.iter().copied());
+        let pmask = ProjectionMask::roots(schema, pred_cols.iter().copied());
+        let p = ArrowPredicateFn::new(pmask, move |b: RecordBatch| {
+            pred(&b).map_err(|e| arrow::error::ArrowError::ComputeError(e.to_string()))
+        });
+        let mut builder = ParquetRecordBatchReaderBuilder::new_with_metadata(f, meta)
+            .with_row_groups(row_groups.to_vec())
+            .with_projection(mask)
+            .with_row_filter(RowFilter::new(vec![Box::new(p)]))
+            .with_batch_size(64 * 1024);
+        if let Some(sel) = selection {
+            builder = builder.with_row_selection(sel);
+        }
+        let mut out = Vec::new();
+        for b in builder.build()? {
+            let b = b?;
+            if b.num_rows() > 0 {
+                out.push(b);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Rows of `row_groups` (in order) on pages of column `col` whose
+    /// min/max range can contain one of `values`; None when the column has
+    /// no page statistics.
+    pub fn page_selection(&self, t: Table, row_groups: &[usize], col: usize, values: &[&[u8]]) -> Option<RowSelection> {
+        use parquet::file::page_index::column_index::ColumnIndexMetaData;
+        let md = self.meta[t.idx()].metadata();
+        let mut ranges = Vec::new();
+        let mut base = 0usize;
+        for &g in row_groups {
+            let rows = md.row_group(g).num_rows() as usize;
+            let pi = md.page_index_for_row_group(g);
+            let (Some(ColumnIndexMetaData::FIXED_LEN_BYTE_ARRAY(ci)), Some(oi)) = (pi.column_index(col), pi.offset_index(col))
+            else {
+                return None;
+            };
+            let locs = oi.page_locations();
+            for (p, loc) in locs.iter().enumerate() {
+                let (Some(lo), Some(hi)) = (ci.min_value(p), ci.max_value(p)) else { continue };
+                if values.iter().any(|v| *v >= lo && *v <= hi) {
+                    let start = loc.first_row_index as usize;
+                    let end = locs.get(p + 1).map(|n| n.first_row_index as usize).unwrap_or(rows);
+                    ranges.push(base + start..base + end);
+                }
+            }
+            base += rows;
+        }
+        Some(RowSelection::from_consecutive_ranges(ranges.into_iter(), base))
+    }
+
+    /// Rows of the sub-groups marked in `masks` (one mask per row group of
+    /// `row_groups`, in order).
+    pub fn sub_selection(&self, t: Table, row_groups: &[usize], masks: &[Vec<bool>]) -> RowSelection {
+        let ti = &self.index.tables[t.idx()];
+        let mut ranges = Vec::new();
+        let mut base = 0usize;
+        for (&g, m) in row_groups.iter().zip(masks) {
+            let mut off = base;
+            for (s, keep) in ti.row_groups[g].subs.iter().zip(m) {
+                if *keep {
+                    ranges.push(off..off + s.rows as usize);
+                }
+                off += s.rows as usize;
+            }
+            base += ti.row_groups[g].rows as usize;
+        }
+        RowSelection::from_consecutive_ranges(ranges.into_iter(), base)
     }
 
     /// Reads `row_groups` of table `t`, only the columns in `cols`
@@ -91,7 +241,7 @@ impl Chunk {
         if row_groups.is_empty() {
             return Ok(Vec::new());
         }
-        let f = File::open(self.dir.join(format!("{}.parquet", t.name())))?;
+        let f = self.files[t.idx()].clone();
         let meta = self.meta[t.idx()].clone();
         let mask = ProjectionMask::roots(meta.parquet_schema(), cols.iter().copied());
         let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(f, meta)
@@ -107,14 +257,35 @@ impl Chunk {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Codec {
+    Lz4,
+    Zstd(i32),
+    None,
+}
+
+impl std::str::FromStr for Codec {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Codec, String> {
+        match s {
+            "lz4" => Ok(Codec::Lz4),
+            "none" => Ok(Codec::None),
+            "zstd" => Ok(Codec::Zstd(1)),
+            z if z.starts_with("zstd") => z[4..].parse().map(Codec::Zstd).map_err(|_| format!("bad codec {s}")),
+            _ => Err(format!("unknown codec {s} (lz4, zstd, zstd<level>, none)")),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct WriteOpts {
     pub row_group_rows: usize,
-    pub zstd_level: i32,
+    pub codec: Codec,
 }
 
 impl Default for WriteOpts {
     fn default() -> Self {
-        WriteOpts { row_group_rows: 32 * 1024, zstd_level: 1 }
+        WriteOpts { row_group_rows: 32 * 1024, codec: Codec::Lz4 }
     }
 }
 
@@ -122,9 +293,31 @@ pub fn chunk_name(from: u64, to: u64) -> String {
     format!("{from:012}-{to:012}")
 }
 
-fn props(o: &WriteOpts) -> WriterProperties {
-    WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::try_new(o.zstd_level).unwrap_or_default()))
+/// Column whose values cluster each row group of table `t` (rows sorted by
+/// it inside the group, with page-level min/max), if any.
+pub fn cluster_col(t: Table) -> Option<&'static str> {
+    match t {
+        Table::Logs => Some("address"),
+        _ => None,
+    }
+}
+
+const PAGE_ROWS: usize = 1024;
+
+fn props(t: Table, o: &WriteOpts) -> WriterProperties {
+    let mut b = WriterProperties::builder();
+    if let Some(c) = cluster_col(t) {
+        b = b
+            .set_column_statistics_enabled(parquet::schema::types::ColumnPath::from(c), EnabledStatistics::Page)
+            .set_data_page_row_count_limit(PAGE_ROWS)
+            .set_write_batch_size(PAGE_ROWS);
+    }
+    b
+        .set_compression(match o.codec {
+            Codec::Lz4 => Compression::LZ4_RAW,
+            Codec::Zstd(l) => Compression::ZSTD(ZstdLevel::try_new(l).unwrap_or_default()),
+            Codec::None => Compression::UNCOMPRESSED,
+        })
         .set_max_row_group_row_count(Some(o.row_group_rows))
         .set_statistics_enabled(EnabledStatistics::Chunk)
         .build()
@@ -142,12 +335,15 @@ pub fn write(root: &Path, b: &Batches, from: u64, to: u64, last: BlockHead, o: &
         let batch = b.get(t);
         let path = tmp.join(format!("{}.parquet", t.name()));
         let file = File::create(&path)?;
-        let mut w = ArrowWriter::try_new(BufWriter::with_capacity(1 << 20, file), t.schema(), Some(props(o)))?;
+        let mut w = ArrowWriter::try_new(BufWriter::with_capacity(1 << 20, file), t.schema(), Some(props(t, o)))?;
         let mut ti = TableIndex { rows: batch.num_rows() as u64, row_groups: Vec::new() };
         let mut off = 0;
         while off < batch.num_rows() {
             let len = o.row_group_rows.min(batch.num_rows() - off);
-            let s = batch.slice(off, len);
+            let s = match cluster_col(t) {
+                Some(c) => cluster(&batch.slice(off, len), c, t.block_col())?,
+                None => batch.slice(off, len),
+            };
             w.write(&s)?;
             w.flush()?;
             ti.row_groups.push(group_index(t, &s));
@@ -170,7 +366,20 @@ pub fn write(root: &Path, b: &Batches, from: u64, to: u64, last: BlockHead, o: &
     Chunk::open(&dst)
 }
 
-fn group_index(t: Table, b: &RecordBatch) -> RowGroupIndex {
+/// Sorts a row group by (`col`, block, original order).
+fn cluster(b: &RecordBatch, col: &str, block_col: &str) -> Result<RecordBatch> {
+    use arrow::compute::{lexsort_to_indices, take_record_batch, SortColumn};
+    let pos = arrow::array::UInt32Array::from_iter_values(0..b.num_rows() as u32);
+    let cols = vec![
+        SortColumn { values: b.column_by_name(col).unwrap().clone(), options: None },
+        SortColumn { values: b.column_by_name(block_col).unwrap().clone(), options: None },
+        SortColumn { values: Arc::new(pos), options: None },
+    ];
+    let idx = lexsort_to_indices(&cols, None)?;
+    Ok(take_record_batch(b, &idx)?)
+}
+
+fn block_range(t: Table, b: &RecordBatch) -> (u64, u64) {
     let blocks = b.column_by_name(t.block_col()).unwrap().as_any().downcast_ref::<UInt64Array>().unwrap();
     let (mut lo, mut hi) = (u64::MAX, 0);
     for i in 0..blocks.len() {
@@ -180,20 +389,33 @@ fn group_index(t: Table, b: &RecordBatch) -> RowGroupIndex {
             hi = hi.max(v);
         }
     }
-    let filters = filtered_cols(t)
-        .iter()
-        .map(|c| {
-            let a = b.column_by_name(c).unwrap().as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
-            let mut keys = Vec::with_capacity(a.len());
-            for i in 0..a.len() {
-                if a.is_valid(i) {
-                    keys.push(key(a.value(i)));
+    (lo, hi)
+}
+
+fn group_index(t: Table, b: &RecordBatch) -> RowGroupIndex {
+    let (lo, hi) = block_range(t, b);
+    let mut subs = Vec::new();
+    let mut off = 0;
+    while off < b.num_rows() {
+        let s = b.slice(off, SUB_ROWS.min(b.num_rows() - off));
+        let (slo, shi) = block_range(t, &s);
+        let filters = filtered_cols(t)
+            .iter()
+            .map(|c| {
+                let a = s.column_by_name(c).unwrap().as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
+                let mut keys = Vec::with_capacity(a.len());
+                for i in 0..a.len() {
+                    if a.is_valid(i) {
+                        keys.push(key(a.value(i)));
+                    }
                 }
-            }
-            Filter::build(keys)
-        })
-        .collect();
-    RowGroupIndex { rows: b.num_rows() as u64, min_block: lo, max_block: hi, filters }
+                Filter::build(keys)
+            })
+            .collect();
+        subs.push(SubIndex { rows: s.num_rows() as u32, min_block: slo, max_block: shi, filters });
+        off += s.num_rows();
+    }
+    RowGroupIndex { rows: b.num_rows() as u64, min_block: lo, max_block: hi, subs }
 }
 
 fn sync_dir(p: &Path) -> Result<()> {
@@ -215,6 +437,15 @@ impl ChunkSet {
         fs::create_dir_all(root.join("chunks"))?;
         let _ = fs::remove_dir_all(root.join("tmp"));
         fs::create_dir_all(root.join("tmp"))?;
+        Self::scan(root, true)
+    }
+
+    /// Opens the chunks without cleaning up (another process may be writing).
+    pub fn open_read_only(root: &Path) -> Result<ChunkSet> {
+        Self::scan(root, false)
+    }
+
+    fn scan(root: &Path, cleanup: bool) -> Result<ChunkSet> {
         let mut ranges: Vec<(u64, u64, PathBuf)> = Vec::new();
         for e in fs::read_dir(root.join("chunks"))? {
             let e = e?;
@@ -231,8 +462,10 @@ impl ChunkSet {
         for (a, b, p) in ranges {
             if let Some(e) = end {
                 if b <= e {
-                    tracing::info!(dir = %p.display(), "removing chunk superseded by compaction");
-                    fs::remove_dir_all(&p)?;
+                    if cleanup {
+                        tracing::info!(dir = %p.display(), "removing chunk superseded by compaction");
+                        fs::remove_dir_all(&p)?;
+                    }
                     continue;
                 }
                 if a != e {

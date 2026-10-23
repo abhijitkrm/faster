@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use arrow::ipc::writer::StreamWriter;
+use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 use arrow::record_batch::RecordBatch;
 use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, Query as UrlQuery, Request, State};
@@ -64,6 +64,8 @@ struct QueryParams {
     format: Option<String>,
     /// "rows" (default) or "rpc": JSON-RPC shaped objects (all fields).
     shape: Option<String>,
+    /// Arrow IPC buffer compression: "lz4" (default) or "none".
+    compression: Option<String>,
 }
 
 async fn query_handler(
@@ -97,6 +99,10 @@ async fn query_handler(
             return err(StatusCode::BAD_REQUEST, e);
         }
     };
+    let lz4 = p.compression.as_deref() != Some("none");
+    if arrow {
+        return stream_arrow(s, plan, lz4, t0).await;
+    }
     let _slot = s.query_slots.acquire().await;
     let r = match query::execute(s.store.clone(), plan, &s.metrics).await {
         Ok(r) => r,
@@ -107,14 +113,7 @@ async fn query_handler(
         }
     };
     s.metrics.queries.fetch_add(1, Relaxed);
-    let res = tokio::task::spawn_blocking(move || {
-        if arrow {
-            encode_arrow(&r).map(|b| (b, "application/vnd.faster-sync.arrow"))
-        } else {
-            encode_json(&r, rpc_shape).map(|b| (b, "application/json"))
-        }
-    })
-    .await;
+    let res = tokio::task::spawn_blocking(move || encode_json(&r, rpc_shape).map(|b| (b, "application/json"))).await;
     s.metrics.query.observe(t0.elapsed());
     match res {
         Ok(Ok((bytes, ct))) => {
@@ -204,30 +203,66 @@ fn write_rpc_row(out: &mut Vec<u8>, t: Table, b: &RecordBatch, row: usize) -> an
     Ok(())
 }
 
-/// Frames: `[tag u8][len u32 LE][bytes]`; tags 0..3 = Arrow IPC stream of
-/// blocks / transactions / logs / traces, 255 = JSON metadata (last).
-pub fn encode_arrow(r: &query::Response) -> anyhow::Result<Vec<u8>> {
+/// Arrow responses are a sequence of frames `[tag u8][len u32 LE][bytes]`:
+/// tags 0..3 hold an Arrow IPC stream of rows of blocks / transactions /
+/// logs / traces (a table can span several frames, in block order), 254 a
+/// JSON error, and 255 the JSON metadata, which is always last.
+pub fn encode_frames(tables: &[Vec<RecordBatch>; 4], lz4: bool) -> anyhow::Result<Vec<u8>> {
+    let opts = if lz4 {
+        IpcWriteOptions::default().try_with_compression(Some(arrow::ipc::CompressionType::LZ4_FRAME))?
+    } else {
+        IpcWriteOptions::default()
+    };
     let mut out = Vec::new();
     for t in TABLES {
-        let bs = &r.tables[t.idx()];
-        let Some(first) = bs.first() else { continue };
+        let bs = &tables[t.idx()];
+        let Some(first) = bs.iter().find(|b| b.num_rows() > 0) else { continue };
         let mut buf = Vec::new();
         {
-            let mut w = StreamWriter::try_new(&mut buf, &first.schema())?;
+            let mut w = StreamWriter::try_new_with_options(&mut buf, &first.schema(), opts.clone())?;
             for b in bs {
                 w.write(b)?;
             }
             w.finish()?;
         }
-        out.push(t.idx() as u8);
-        out.extend_from_slice(&(buf.len() as u32).to_le_bytes());
-        out.extend_from_slice(&buf);
+        frame(&mut out, t.idx() as u8, &buf);
     }
-    let m = serde_json::to_vec(&meta_json(r))?;
-    out.push(255);
-    out.extend_from_slice(&(m.len() as u32).to_le_bytes());
-    out.extend_from_slice(&m);
     Ok(out)
+}
+
+fn frame(out: &mut Vec<u8>, tag: u8, body: &[u8]) {
+    out.push(tag);
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(body);
+}
+
+async fn stream_arrow(s: Shared, plan: Plan, lz4: bool, t0: Instant) -> Response {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(8);
+    let enc: query::Encoder = Arc::new(move |t| Ok(Bytes::from(encode_frames(t, lz4)?)));
+    tokio::spawn(async move {
+        let _slot = s.query_slots.acquire().await;
+        let out = query::Output::Stream { enc, tx: tx.clone() };
+        let mut tail = Vec::new();
+        match query::execute_to(s.store.clone(), plan, &s.metrics, out).await {
+            Ok(r) => {
+                s.metrics.queries.fetch_add(1, Relaxed);
+                frame(&mut tail, 255, &serde_json::to_vec(&meta_json(&r)).unwrap_or_default());
+            }
+            Err(e) => {
+                s.metrics.query_errors.fetch_add(1, Relaxed);
+                tracing::error!(error = %e, "query failed");
+                frame(&mut tail, 254, &serde_json::to_vec(&json!({"error": e.to_string()})).unwrap_or_default());
+            }
+        }
+        let _ = tx.send(Bytes::from(tail)).await;
+        s.metrics.query.observe(t0.elapsed());
+    });
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|b| (Ok::<_, std::io::Error>(b), rx))
+    });
+    let mut resp = Response::new(Body::from_stream(stream));
+    resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/vnd.faster-sync.arrow"));
+    resp
 }
 
 #[derive(Deserialize)]

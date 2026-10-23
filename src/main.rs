@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use faster_sync::api::{self, AppState, Guard, GuardConfig};
-use faster_sync::ingest::{Ingest, IngestConfig, WriteOptsCfg};
+use faster_sync::chunk::WriteOpts;
+use faster_sync::ingest::{Ingest, IngestConfig};
 use faster_sync::metrics::Metrics;
 use faster_sync::query::Limits;
 use faster_sync::rpc::{Rpc, RpcConfig};
@@ -34,8 +35,14 @@ async fn main() -> Result<()> {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
-    let rpc_url = std::env::var("RPC_URL").context("RPC_URL is required")?;
     let data = PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".into()));
+    let Ok(rpc_url) = std::env::var("RPC_URL") else {
+        // Serve-only: answer queries from an existing data dir (replicas,
+        // benchmarks); nothing is ingested.
+        let store = Arc::new(Store::open_read_only(&data).context("RPC_URL unset: serve-only needs an existing DATA_DIR")?);
+        tracing::info!(chain_id = store.meta.chain_id, "serve-only (no RPC_URL)");
+        return serve(store, Arc::new(Metrics::default()), None).await;
+    };
     let rpc = Arc::new(Rpc::new(RpcConfig {
         url: rpc_url,
         timeout: Duration::from_millis(env("RPC_TIMEOUT_MS", 30_000)),
@@ -68,13 +75,12 @@ async fn main() -> Result<()> {
         hot_max_age: Duration::from_secs(env("HOT_MAX_AGE_SECS", d.hot_max_age.as_secs())),
         poll: Duration::from_millis(env("POLL_MS", d.poll.as_millis() as u64)),
         end_block: std::env::var("END_BLOCK").ok().and_then(|v| v.parse().ok()),
-        write: WriteOptsCfg {
+        write: WriteOpts {
             row_group_rows: env("ROW_GROUP_ROWS", d.write.row_group_rows).max(1024),
-            zstd_level: env("ZSTD_LEVEL", d.write.zstd_level),
+            codec: env("COMPRESSION", d.write.codec),
         },
     };
     let ingest = Ingest { store: store.clone(), rpc: rpc.clone(), cfg, stats: metrics.clone() };
-    let exit_on_end = std::env::var("END_BLOCK").is_ok() && env("EXIT_AT_END", false);
     let ingest_task = tokio::spawn(async move {
         let r = ingest.run().await;
         if let Err(e) = &r {
@@ -83,6 +89,14 @@ async fn main() -> Result<()> {
         r
     });
 
+    serve(store, metrics, Some(ingest_task)).await
+}
+
+async fn serve(
+    store: Arc<Store>,
+    metrics: Arc<Metrics>,
+    ingest: Option<tokio::task::JoinHandle<Result<()>>>,
+) -> Result<()> {
     let state = Arc::new(AppState {
         store: store.clone(),
         metrics: metrics.clone(),
@@ -117,16 +131,12 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         });
-    if exit_on_end {
-        tokio::select! {
-            r = ingest_task => { r??; }
+    match ingest {
+        Some(ingest) => tokio::select! {
+            r = ingest => { r??; }
             r = server => { r?; }
-        }
-    } else {
-        tokio::select! {
-            r = ingest_task => { r??; }
-            r = server => { r?; }
-        }
+        },
+        None => server.await?,
     }
     Ok(())
 }
