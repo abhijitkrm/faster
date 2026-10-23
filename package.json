@@ -1,0 +1,28 @@
+{
+  "name": "faster-index",
+  "version": "0.1.0",
+  "description": "EVM indexing framework on faster-sync: typed event handlers, Postgres entities with reorg rollback, generated GraphQL API",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": { "faster-index": "dist/cli.js" },
+  "files": ["dist", "templates"],
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "tsc -p . && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.5.11",
+    "graphql": "^16.11.0",
+    "pg": "^8.23.1",
+    "viem": "^2.57.10",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.23.1",
+    "typescript": "^5.9.3"
+  },
+  "engines": { "node": ">=22.6" }
+}

@@ -1,0 +1,14 @@
+name: usdt-balances
+schema: schema.graphql
+handlers: src/handlers.ts
+contracts:
+  - name: ERC20
+    events:
+      - Transfer(address indexed from, address indexed to, uint256 value)
+networks:
+  - id: 1
+    sync_url: ${SYNC_URL:-http://localhost:3100}
+    start_block: ${START_BLOCK:-0}
+    contracts:
+      - name: ERC20
+        address: ["0xdac17f958d2ee523a2206206994597c13d831ec7"]
