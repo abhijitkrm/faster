@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod chunk;
+pub mod feed;
 pub mod filter;
 pub mod hot;
 pub mod ingest;
