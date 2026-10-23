@@ -117,7 +117,13 @@ async fn json_rpc_shape_arrow_and_errors() {
     assert!(tags.contains(&2) && tags.contains(&1) && tags.contains(&0), "logs, joined txs and blocks: {tags:?}");
 
     // join=blocks: logs and their headers, no transactions.
-    let (_, b) = post(&app, "/query", json!({"from_block": 0, "to_block": 30, "logs": [{"address": [busy]}], "join": "blocks"}), None).await;
+    let (_, b) = post(
+        &app,
+        "/query",
+        json!({"from_block": 0, "to_block": 30, "logs": [{"address": [busy]}], "join": "blocks"}),
+        None,
+    )
+    .await;
     let v: Value = serde_json::from_slice(&b).unwrap();
     assert!(!v["logs"].as_array().unwrap().is_empty());
     assert!(v["transactions"].as_array().unwrap().is_empty());

@@ -164,16 +164,8 @@ pub static TRACE_COLS: &[Col] = &[
 /// position (block hash on a tx, …) and are not kept in `extra`.
 const BLOCK_SKIP: &[&str] = &["transactions"];
 const TX_SKIP: &[&str] = &["blockHash"];
-const RECEIPT_SKIP: &[&str] = &[
-    "transactionHash",
-    "transactionIndex",
-    "blockHash",
-    "blockNumber",
-    "from",
-    "to",
-    "type",
-    "logs",
-];
+const RECEIPT_SKIP: &[&str] =
+    &["transactionHash", "transactionIndex", "blockHash", "blockNumber", "from", "to", "type", "logs"];
 const LOG_SKIP: &[&str] = &["topics", "blockHash", "removed"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
