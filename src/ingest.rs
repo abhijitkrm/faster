@@ -10,6 +10,7 @@ use futures::StreamExt;
 
 use crate::chunk::{self, WriteOpts};
 use crate::hot::HotBlock;
+use crate::metrics::Metrics;
 use crate::model::{Batches, BlockHead, Builder};
 use crate::rpc::{RawBlock, Rpc, RpcError};
 use crate::store::Store;
@@ -62,7 +63,7 @@ pub struct Ingest {
     pub stats: Arc<crate::metrics::Metrics>,
 }
 
-fn build(raw: Vec<RawBlock>) -> Result<(Batches, Vec<BlockHead>)> {
+pub(crate) fn build(raw: Vec<RawBlock>) -> Result<(Batches, Vec<BlockHead>)> {
     let mut b = Builder::new();
     for r in raw {
         b.add_block(r.block, r.receipts, r.traces)?;
@@ -71,7 +72,7 @@ fn build(raw: Vec<RawBlock>) -> Result<(Batches, Vec<BlockHead>)> {
     Ok((b.finish(), heads))
 }
 
-fn build_each(raw: Vec<RawBlock>) -> Result<Vec<HotBlock>> {
+pub(crate) fn build_each(raw: Vec<RawBlock>) -> Result<Vec<HotBlock>> {
     raw.into_iter()
         .map(|r| {
             let mut b = Builder::new();
@@ -298,43 +299,52 @@ impl Ingest {
         Ok(())
     }
 
-    /// Moves finalized hot blocks into a chunk when there are enough of them,
-    /// they are old enough, or `force`.
     async fn chunk_hot(&self, fin: u64, force: bool) -> Result<()> {
-        let Some(first) = self.store.hot.first() else { return Ok(()) };
-        if first > fin {
-            return Ok(());
-        }
-        let to = (fin + 1).min(first + self.cfg.chunk_max_blocks);
-        let rows = self.store.hot.rows_until(to);
-        let old = self
-            .store
-            .hot
-            .get(first)
-            .map(|b| now_secs().saturating_sub(b.head.timestamp) > self.cfg.hot_max_age.as_secs())
-            .unwrap_or(false);
-        if !(force || rows >= self.cfg.hot_max_rows || old) {
-            return Ok(());
-        }
-        let blocks = self.store.hot.range(first, to);
-        let Some(last) = blocks.last().map(|b| b.head) else { return Ok(()) };
-        let end = last.number + 1;
-        let (store, opts, stats) = (self.store.clone(), self.cfg.write, self.stats.clone());
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let t = Instant::now();
-            let parts: Vec<Batches> = blocks.iter().map(|b| b.batches.clone()).collect();
-            let b = Batches::concat(&parts);
-            let c = chunk::write(store.chunks_root(), &b, first, end, last, &opts)?;
-            store.publish(c);
-            store.hot.drop_before(end)?;
-            stats.chunk_write.observe(t.elapsed());
-            tracing::info!(from = first, to = end, rows = b.rows(), "hot blocks chunked");
-            Ok(())
-        })
-        .await??;
-        self.store.notify();
-        Ok(())
+        chunk_hot(&self.store, &self.cfg, &self.stats, fin, force).await
     }
+}
+
+/// Moves finalized hot blocks into a chunk when there are enough of them,
+/// they are old enough, or `force`.
+pub async fn chunk_hot(
+    store: &Arc<Store>,
+    cfg: &IngestConfig,
+    stats: &Arc<Metrics>,
+    fin: u64,
+    force: bool,
+) -> Result<()> {
+    let Some(first) = store.hot.first() else { return Ok(()) };
+    if first > fin {
+        return Ok(());
+    }
+    let to = (fin + 1).min(first + cfg.chunk_max_blocks);
+    let rows = store.hot.rows_until(to);
+    let old = store
+        .hot
+        .get(first)
+        .map(|b| now_secs().saturating_sub(b.head.timestamp) > cfg.hot_max_age.as_secs())
+        .unwrap_or(false);
+    if !(force || rows >= cfg.hot_max_rows || old) {
+        return Ok(());
+    }
+    let blocks = store.hot.range(first, to);
+    let Some(last) = blocks.last().map(|b| b.head) else { return Ok(()) };
+    let end = last.number + 1;
+    let (st, opts, stats) = (store.clone(), cfg.write, stats.clone());
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let t = Instant::now();
+        let parts: Vec<Batches> = blocks.iter().map(|b| b.batches.clone()).collect();
+        let b = Batches::concat(&parts);
+        let c = chunk::write(st.chunks_root(), &b, first, end, last, &opts)?;
+        st.publish(c);
+        st.hot.drop_before(end)?;
+        stats.chunk_write.observe(t.elapsed());
+        tracing::info!(from = first, to = end, rows = b.rows(), "hot blocks chunked");
+        Ok(())
+    })
+    .await??;
+    store.notify();
+    Ok(())
 }
 
 /// Merges runs of small adjacent chunks (the live tail writes many) into

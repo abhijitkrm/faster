@@ -85,3 +85,32 @@ fsq ./bench-data '{"from_block":0,"logs":[{"address":["0xc0000000000000000000000
 
 Load the same rows into ClickHouse with
 `INSERT INTO t FORMAT Parquet` from `chunks/*/logs.parquet`.
+
+## v0.2.0
+
+**Unique-value columns without dictionaries.** Reading a dictionary-encoded
+column decodes its whole dictionary first; for hashes, signatures and call
+data the dictionary is as large as the data and that dominated point
+lookups. Turning dictionaries off for those columns (and capping pages at
+64 KB) changed, in-process on the synthetic set:
+
+| | v0.1 | v0.2 |
+|---|---:|---:|
+| tx by hash, all fields | 1.9 ms | 0.70 ms |
+| tx + its logs + header (receipt) | 4.3 ms | 1.8 ms |
+| full block (151 txs) | 1.5 ms | 0.35 ms |
+| busiest contract (511K logs) | 42 ms | 18 ms |
+| rare contract | 2.3 ms | 1.3 ms |
+| one wallet's Transfers | 1.9 ms | 1.1 ms |
+
+Chunks are 7% smaller. Through faster-rpc on Ethereum mainnet data (same
+blocks, both layouts served side by side, cold, median of 20):
+`eth_getTransactionByHash` 7.1 → 2.4 ms, `eth_getTransactionReceipt`
+13.0 → 3.8 ms, `eth_getBlockReceipts` 25 → 18 ms.
+
+**Rarest field first.** For selections with several fields, the field
+whose filters pass in the fewest sub-groups is checked alone first; the
+other columns are decoded only for rows that survive it. Mainnet Transfers
+with topic2 = `0x…01`: 18.5 → 14.6 ms (ClickHouse by address: 6.3 ms; the
+rest is decoding the 32-byte topic column for 2.2M candidate rows).
+Single-field selections are unchanged.

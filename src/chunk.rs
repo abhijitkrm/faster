@@ -141,6 +141,7 @@ impl Chunk {
         out
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Reads rows of `row_groups` of table `t` that pass `pred` (evaluated
     /// on the `pred_cols` columns only), returning the `cols` columns.
     /// Columns outside `pred_cols` are decoded only for passing rows.
@@ -150,6 +151,7 @@ impl Chunk {
         row_groups: &[usize],
         cols: &[usize],
         selection: Option<RowSelection>,
+        pre: Option<(Vec<usize>, crate::query::PredFn)>,
         pred_cols: &[usize],
         mut pred: impl FnMut(&RecordBatch) -> anyhow::Result<arrow::array::BooleanArray> + Send + 'static,
     ) -> Result<Vec<RecordBatch>> {
@@ -164,10 +166,18 @@ impl Chunk {
         let p = ArrowPredicateFn::new(pmask, move |b: RecordBatch| {
             pred(&b).map_err(|e| arrow::error::ArrowError::ComputeError(e.to_string()))
         });
+        let mut preds: Vec<Box<dyn parquet::arrow::arrow_reader::ArrowPredicate>> = Vec::new();
+        if let Some((pcols, mut pf)) = pre {
+            let m = ProjectionMask::roots(schema, pcols.iter().copied());
+            preds.push(Box::new(ArrowPredicateFn::new(m, move |b: RecordBatch| {
+                pf(&b).map_err(|e| arrow::error::ArrowError::ComputeError(e.to_string()))
+            })));
+        }
+        preds.push(Box::new(p));
         let mut builder = ParquetRecordBatchReaderBuilder::new_with_metadata(f, meta)
             .with_row_groups(row_groups.to_vec())
             .with_projection(mask)
-            .with_row_filter(RowFilter::new(vec![Box::new(p)]))
+            .with_row_filter(RowFilter::new(preds))
             .with_batch_size(64 * 1024);
         if let Some(sel) = selection {
             builder = builder.with_row_selection(sel);
@@ -300,10 +310,59 @@ pub fn cluster_col(t: Table) -> Option<&'static str> {
 
 const PAGE_ROWS: usize = 1024;
 
+/// Columns whose values are (nearly) all distinct.
+const UNIQUE_COLS: &[&str] = &[
+    "hash",
+    "parent_hash",
+    "transaction_hash",
+    "input",
+    "data",
+    "r",
+    "s",
+    "v",
+    "logs_bloom",
+    "state_root",
+    "transactions_root",
+    "receipts_root",
+    "mix_hash",
+    "extra",
+    "receipt_extra",
+    "output",
+    "nonce",
+    "value",
+    "cumulative_gas_used",
+    "topic1",
+    "topic2",
+    "topic3",
+    "access_list",
+    "trace_address",
+];
+
+/// Byte cap per data page: heavy columns (call data, logs blooms) get small
+/// pages too, so a point lookup decompresses little. `PAGE_BYTES` overrides.
+fn page_bytes() -> usize {
+    std::env::var("PAGE_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(64 * 1024)
+}
+
 fn props(t: Table, o: &WriteOpts) -> WriterProperties {
     // Small pages everywhere: with the offset index, a point lookup decodes
     // only the pages holding its rows.
-    let mut b = WriterProperties::builder().set_data_page_row_count_limit(PAGE_ROWS).set_write_batch_size(PAGE_ROWS);
+    let mut b = WriterProperties::builder()
+        .set_data_page_row_count_limit(PAGE_ROWS)
+        .set_data_page_size_limit(page_bytes())
+        .set_write_batch_size(PAGE_ROWS);
+    // Dictionaries only pay off for repetitive columns; for unique values
+    // (hashes, signatures, call data) they are large, compress nothing, and
+    // every read of the column must decode the whole dictionary first.
+    if std::env::var("DICT_NONE").is_ok() {
+        b = b.set_dictionary_enabled(false);
+    } else if std::env::var("DICT_ALL").is_err() {
+        for c in UNIQUE_COLS {
+            if t.col_index(c).is_some() {
+                b = b.set_column_dictionary_enabled(parquet::schema::types::ColumnPath::from(*c), false);
+            }
+        }
+    }
     if let Some(c) = cluster_col(t) {
         b = b.set_column_statistics_enabled(parquet::schema::types::ColumnPath::from(c), EnabledStatistics::Page);
     }

@@ -456,3 +456,49 @@ async fn guard_mw(State(g): State<Arc<Guard>>, req: Request, next: Next) -> Resp
     h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("Content-Type, Authorization"));
     resp
 }
+
+fn env<T: std::str::FromStr>(k: &str, d: T) -> T {
+    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+}
+
+fn env_list(k: &str) -> Vec<String> {
+    std::env::var(k).unwrap_or_default().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+}
+
+/// Binds the API (`LISTEN`) and metrics (`ADMIN_LISTEN`) listeners with the
+/// limits and access settings from the environment and serves them in the
+/// background.
+pub async fn spawn_from_env(store: Arc<Store>, metrics: Arc<Metrics>) -> anyhow::Result<()> {
+    let state = Arc::new(AppState {
+        store,
+        metrics: metrics.clone(),
+        limits: Limits {
+            max_rows: env("QUERY_MAX_ROWS", 200_000),
+            max_time: Duration::from_millis(env("QUERY_MAX_MS", 5_000)),
+            parallelism: env("QUERY_PARALLELISM", std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8)),
+            max_selection_values: env("QUERY_MAX_VALUES", 10_000),
+        },
+        ready_max_lag: env("READY_MAX_LAG", 10),
+        query_slots: tokio::sync::Semaphore::new(env("QUERY_CONCURRENCY", 32)),
+    });
+    let guard = Guard::new(
+        GuardConfig {
+            rate: env("RATE_LIMIT_RPS", 0.0),
+            burst: env("RATE_LIMIT_BURST", 50.0),
+            trust_proxy: env("TRUST_PROXY", false),
+            cors_origins: env_list("CORS_ORIGINS"),
+            api_keys: env_list("API_KEYS"),
+        },
+        metrics,
+    );
+    tokio::spawn(guard.clone().sweep());
+    let app = router(state.clone(), guard);
+    let addr: SocketAddr = std::env::var("LISTEN").unwrap_or_else(|_| "0.0.0.0:3100".into()).parse()?;
+    let admin: SocketAddr = std::env::var("ADMIN_LISTEN").unwrap_or_else(|_| "127.0.0.1:9101".into()).parse()?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let admin_l = tokio::net::TcpListener::bind(admin).await?;
+    tracing::info!(%addr, %admin, "faster-sync API listening");
+    tokio::spawn(async move { axum::serve(admin_l, admin_router(state)).await });
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await });
+    Ok(())
+}
