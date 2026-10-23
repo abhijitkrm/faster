@@ -20,7 +20,8 @@ pub struct Meta {
     pub version: u32,
 }
 
-const META_VERSION: u32 = 1;
+/// 2: logs carry topic key columns (v0.3).
+const META_VERSION: u32 = 2;
 
 pub struct Store {
     pub root: PathBuf,
@@ -62,7 +63,12 @@ impl Store {
                 bail!("data dir {} holds chain {} but the node is chain {}", root.display(), m.chain_id, chain_id);
             }
             if m.version != META_VERSION {
-                bail!("data dir version {} (this build reads {})", m.version, META_VERSION);
+                bail!(
+                    "data dir {} has store format {} but this build uses {}: rebuild it (move it away and re-ingest)",
+                    root.display(),
+                    m.version,
+                    META_VERSION
+                );
             }
             m
         } else {

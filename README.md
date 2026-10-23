@@ -17,8 +17,9 @@ implementation.
 | one wallet's incoming Transfers | **3.4 ms** | 9.2 ms |
 | 9M logs, streamed in 10 pages | **0.89 s** | 0.94 s |
 
-Synthetic 12M-row chain, laptop; method, mainnet numbers and where
-ClickHouse still wins: [docs/BENCHMARK.md](docs/BENCHMARK.md).
+Synthetic 12M-row chain, laptop. On mainnet data, Transfers filtered on a
+common topic value: 5–7 ms (ClickHouse best layout 6 ms). Method and all
+numbers: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## How it works
 

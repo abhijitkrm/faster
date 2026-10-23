@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::filter::{filtered_cols, key, Filter};
 use crate::model::{Batches, BlockHead, Table, TABLES};
 
-const INDEX_MAGIC: &[u8; 8] = b"FSYNIDX2";
+const INDEX_MAGIC: &[u8; 8] = b"FSYNIDX3";
 
 /// A run of `SUB_ROWS` rows of a row group (page aligned): the unit of
 /// filtering, so a hit decodes a few pages rather than a whole row group.

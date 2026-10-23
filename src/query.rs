@@ -250,7 +250,9 @@ const DEFAULT_FIELDS: [&[&str]; 4] = [
 fn out_cols(t: Table, f: &Option<Vec<String>>) -> Result<Vec<&'static str>> {
     let names: Vec<&'static str> = match f {
         None => DEFAULT_FIELDS[t.idx()].to_vec(),
-        Some(v) if v.iter().any(|s| s == "*") => t.cols().iter().map(|c| c.name).collect(),
+        Some(v) if v.iter().any(|s| s == "*") => {
+            t.cols().iter().map(|c| c.name).filter(|n| !crate::model::hidden(n)).collect()
+        }
         Some(v) => v
             .iter()
             .map(|s| {
@@ -624,8 +626,78 @@ impl Ctx<'_> {
             let h = self.field_hits.get(i);
             s.fields.len() >= 2 && h.is_some_and(|h| h.iter().min() < h.iter().max())
         });
-        let pre =
-            (pre_enabled() && !all && rare_enough && join.as_ref().is_none_or(|(k, _)| k.is_empty())).then(|| {
+        let no_join = join.as_ref().is_none_or(|(k, _)| k.is_empty());
+        // Logs: topic filters compare the 8-byte topic keys first (a row can
+        // only match if, for some selection, all its topic keys match); the
+        // 32-byte topics are then checked exactly for the survivors only.
+        let key_pre = (t == Table::Logs && keys_enabled() && !all && no_join)
+            .then(|| {
+                let per_sel: Vec<Vec<(&'static str, Vec<u64>)>> = sels
+                    .iter()
+                    .map(|s| {
+                        s.fields
+                            .iter()
+                            .filter(|f| f.col.starts_with("topic"))
+                            .map(|f| {
+                                let mut k = f.keys.clone();
+                                k.sort_unstable();
+                                k.dedup();
+                                (topic_key_col(f.col), k)
+                            })
+                            .collect()
+                    })
+                    .collect();
+                (per_sel.iter().all(|v| !v.is_empty())).then_some(per_sel)
+            })
+            .flatten()
+            .map(|per_sel| {
+                let names: BTreeSet<&'static str> = per_sel.iter().flatten().map(|(c, _)| *c).collect();
+                // Column at a time over the raw u64 values: a selection's
+                // mask is the AND of its key checks, the result the OR of the
+                // selections' masks.
+                let f: PredFn = Box::new(move |b: &RecordBatch| {
+                    let n = b.num_rows();
+                    let mut any = vec![false; n];
+                    for sel in &per_sel {
+                        let mut ok = vec![true; n];
+                        for (c, keys) in sel {
+                            let a = u64s(b, c).expect("key column");
+                            let vals = a.values();
+                            let nulls = a.nulls();
+                            match keys.len() {
+                                1 => {
+                                    let k = keys[0];
+                                    for (o, v) in ok.iter_mut().zip(vals.iter()) {
+                                        *o &= *v == k;
+                                    }
+                                }
+                                2..=8 => {
+                                    for (o, v) in ok.iter_mut().zip(vals.iter()) {
+                                        *o &= keys.contains(v);
+                                    }
+                                }
+                                _ => {
+                                    for (o, v) in ok.iter_mut().zip(vals.iter()) {
+                                        *o &= keys.binary_search(v).is_ok();
+                                    }
+                                }
+                            }
+                            if let Some(nl) = nulls {
+                                for (i, o) in ok.iter_mut().enumerate() {
+                                    *o &= nl.is_valid(i);
+                                }
+                            }
+                        }
+                        for (x, o) in any.iter_mut().zip(ok) {
+                            *x |= o;
+                        }
+                    }
+                    Ok(BooleanArray::from(any))
+                });
+                (pos(&names), f)
+            });
+        let pre = key_pre.or_else(|| {
+            (pre_enabled() && !all && rare_enough && no_join).then(|| {
                 let pick: Vec<(&'static str, HashSet<Vec<u8>>)> = sels
                     .iter()
                     .enumerate()
@@ -646,7 +718,8 @@ impl Ctx<'_> {
                     Ok(BooleanArray::new(m.finish(), None))
                 });
                 (pos(&names), f)
-            });
+            })
+        });
         let (sels, keys, from, to) = (sels.clone(), join.map(|j| j.0), self.from, self.to);
         let f = Box::new(move |b: &RecordBatch| mask(t, b, &sels, all, keys.as_deref(), from, to));
         let mut rows = self.src.read(t, &groups, &pos(&out), Pred { cols: pos(&pred), f, cluster, pre })?;
@@ -654,6 +727,21 @@ impl Ctx<'_> {
             rows = vec![block_order(t, &rows)?];
         }
         Ok(rows)
+    }
+}
+
+/// `QUERY_KEYS=0` turns off the topic-key pass (benchmarks).
+fn keys_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("QUERY_KEYS").map_or(true, |v| v != "0"))
+}
+
+fn topic_key_col(topic: &str) -> &'static str {
+    match topic {
+        "topic0" => "topic0_key",
+        "topic1" => "topic1_key",
+        "topic2" => "topic2_key",
+        _ => "topic3_key",
     }
 }
 
