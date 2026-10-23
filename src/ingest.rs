@@ -81,22 +81,26 @@ fn build_each(raw: Vec<RawBlock>) -> Result<Vec<HotBlock>> {
         .collect()
 }
 
-/// Calls `f` until it succeeds, backing off on retryable errors.
+/// Calls `f` until it succeeds. Retryable errors (rate limits, timeouts,
+/// node behind) are retried forever with capped backoff: a long outage of
+/// the node must not stop ingest. Other errors fail after a few tries.
 async fn retry<T, F, Fut>(what: &str, mut f: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, RpcError>>,
 {
     let mut delay = Duration::from_millis(200);
-    let mut tries = 0;
+    let mut tries = 0u32;
     loop {
         match f().await {
             Ok(v) => return Ok(v),
-            Err(e) if e.retryable() && tries < 30 => {
+            Err(e) if e.retryable() || tries < 3 => {
                 tries += 1;
-                tracing::warn!(error = %e, what, tries, "rpc retry");
+                if tries <= 3 || tries.is_power_of_two() {
+                    tracing::warn!(error = %e, what, tries, "rpc retry");
+                }
                 tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(10));
+                delay = (delay * 2).min(Duration::from_secs(15));
             }
             Err(e) => bail!("{what}: {e}"),
         }
