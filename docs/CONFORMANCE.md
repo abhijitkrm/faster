@@ -36,7 +36,23 @@ Found and fixed on the way: anvil adds `blockTimestamp` to transactions,
 receipts (as a JSON number) and logs; faster-sync now keeps every key the
 node returns verbatim instead of dropping derivable ones.
 
-## Latency (mainnet data, laptop, faster-rpc → faster-sync on localhost)
+## reth dev chain through faster-sync-reth (v0.2.0)
+
+faster-sync running inside a reth dev node as an execution extension,
+faster-rpc on top, compared with that node's own JSON-RPC: 335 / 335 equal;
+with reth's reorg injection (`--debug.reorg-frequency 8 --debug.reorg-depth
+2`) on blocks that had settled: 389 / 389 equal.
+
+## Latency v0.2.0 (mainnet data, cold, curl, median of 20)
+
+| Call | v0.1 layout | v0.2 layout |
+|---|---:|---:|
+| `eth_getTransactionByHash` | 7.1 ms | 2.4 ms |
+| `eth_getTransactionReceipt` | 13.0 ms | 3.8 ms |
+| `eth_getBlockReceipts` | 25 ms | 18 ms |
+| repeated finalized tx / receipt (cache) | | < 1 ms |
+
+## Latency v0.1.0 (mainnet data, laptop, faster-rpc → faster-sync on localhost, Python client)
 
 | Call | Median |
 |---|---:|

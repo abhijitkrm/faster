@@ -40,6 +40,7 @@ async fn main() -> Result<()> {
         max_block_range: env("MAX_BLOCK_RANGE", d.max_block_range),
         block_timestamp: env("BLOCK_TIMESTAMP", d.block_timestamp),
         cache_blocks: env("CACHE_BLOCKS", d.cache_blocks),
+        cache_txs: env("CACHE_TXS", d.cache_txs),
     };
     let ctx = Arc::new(Ctx::new(sync, upstream, cfg));
     let metrics = Arc::new(Metrics::default());

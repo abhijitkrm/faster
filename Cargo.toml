@@ -1,6 +1,6 @@
 [package]
 name = "faster-rpc"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Read-only Ethereum JSON-RPC served from faster-sync, with an upstream node for state methods"
 license = "UNLICENSED"
