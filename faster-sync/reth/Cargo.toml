@@ -1,0 +1,22 @@
+[package]
+name = "faster-sync-reth"
+version = "0.2.0"
+edition = "2021"
+description = "reth node with faster-sync built in (execution extension): blocks and receipts go straight into the store"
+license = "UNLICENSED"
+publish = false
+
+[workspace]
+
+[dependencies]
+faster-sync = { path = ".." }
+reth-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.8.0", features = ["full", "cli"] }
+reth-exex = { git = "https://github.com/paradigmxyz/reth", tag = "v2.8.0" }
+alloy-eips = "2"
+alloy-primitives = "1"
+anyhow = "1"
+eyre = "0.6"
+futures = "0.3"
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
