@@ -1,0 +1,29 @@
+== rocksdb: loading 500000 blocks / 5000000 txs
+  load 22.4s  = 223427 tx/s ingest  size 0.52 GB
+  tx by hash                 p50  10.125µs  p99  18.208µs  p99.9  37.333µs  1-thread    96576 ops/s
+  latest 20 blocks           p50  15.750µs  p99  18.459µs  p99.9  40.375µs  1-thread    62277 ops/s
+  addr page warm (25)        p50  91.583µs  p99 145.167µs  p99.9 181.125µs  1-thread    10618 ops/s
+  addr page hot (25)         p50  26.208µs  p99  34.166µs  p99.9  58.292µs  1-thread    37486 ops/s
+  addr page hot deep (25)    p50  44.833µs  p99  63.125µs  p99.9  94.417µs  1-thread    21914 ops/s
+  range scan to=X 100k blk   p50 166.600ms  p99 222.698ms  p99.9 222.698ms  1-thread        6 ops/s
+  agg full history           p50 813.922ms  p99 815.233ms  p99.9 815.233ms  1-thread        1 ops/s
+  tx by hash                 8 threads     457528 ops/s
+  addr page warm (25)        8 threads      31846 ops/s
+== fjall: loading 500000 blocks / 5000000 txs
+  load 26.1s  = 191314 tx/s ingest  size 0.78 GB
+  tx by hash                 p50  11.584µs  p99  21.500µs  p99.9  50.416µs  1-thread    85640 ops/s
+  latest 20 blocks           p50   1.875µs  p99   2.041µs  p99.9   2.708µs  1-thread   518569 ops/s
+  addr page warm (25)        p50  84.250µs  p99 146.083µs  p99.9 193.000µs  1-thread    12035 ops/s
+  addr page hot (25)         p50   9.083µs  p99  10.000µs  p99.9  32.541µs  1-thread   108417 ops/s
+  addr page hot deep (25)    p50  15.542µs  p99  18.750µs  p99.9  32.167µs  1-thread    63664 ops/s
+  range scan to=X 100k blk   p50 113.292ms  p99 117.644ms  p99.9 117.644ms  1-thread        8 ops/s
+  agg full history           p50 688.040ms  p99 693.845ms  p99.9 693.845ms  1-thread        1 ops/s
+  tx by hash                 8 threads    1021917 ops/s
+  addr page warm (25)        8 threads      82339 ops/s
+== redb: loading 500000 blocks / 5000000 txs
+  load 220.8s  = 22647 tx/s ingest  size 4.30 GB
+  tx by hash                 p50   4.709µs  p99  10.625µs  p99.9  25.792µs  1-thread   196924 ops/s
+  latest 20 blocks           p50   1.666µs  p99   1.833µs  p99.9   8.541µs  1-thread   592875 ops/s
+  addr page warm (25)        p50  33.458µs  p99  74.917µs  p99.9 137.917µs  1-thread    26598 ops/s
+  addr page hot (25)         p50  10.416µs  p99  13.750µs  p99.9  37.166µs  1-thread    94652 ops/s
+DONE
