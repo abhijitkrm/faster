@@ -72,7 +72,8 @@ SYNC_URL=http://localhost:3100 UPSTREAM_URL=https://ethereum-rpc.publicnode.com 
 
 # 3. faster-index: scaffold an indexer, GraphQL on :8080
 npx faster-index init my-indexer && cd my-indexer && npm install
-SYNC_URL=http://localhost:3100 START_BLOCK=23000000 npx faster-index dev
+# set start_block in faster-index.yaml to a block faster-sync has (e.g. 23000000)
+SYNC_URL=http://localhost:3100 npx faster-index dev
 ```
 
 See each repo's README for every setting, Docker images and the API reference.
