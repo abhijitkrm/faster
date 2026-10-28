@@ -252,7 +252,12 @@ impl FakeChain {
 
     /// Serves on 127.0.0.1:`port` (0 = any); returns the URL.
     pub async fn serve(self: Arc<Self>, port: u16) -> String {
-        let l = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+        self.serve_on("127.0.0.1", port).await
+    }
+
+    /// Serves on `host`:`port` (0 = any); returns the URL.
+    pub async fn serve_on(self: Arc<Self>, host: &str, port: u16) -> String {
+        let l = tokio::net::TcpListener::bind((host, port)).await.unwrap();
         let url = format!("http://{}", l.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(l, self.router()).await });
         url

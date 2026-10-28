@@ -2,6 +2,7 @@
 //! faster-rpc / faster-index, CI smoke tests).
 //! Usage: fakechain <port> <head> [block_ms] [txs per block]
 //! With block_ms > 0 a new block is added every block_ms milliseconds.
+//! Binds 127.0.0.1 unless FAKECHAIN_HOST is set (0.0.0.0 in containers).
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -14,7 +15,8 @@ async fn main() {
     let arg = |i: usize, d: u64| a.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
     let (port, head, block_ms, txs) = (arg(1, 8545) as u16, arg(2, 1000), arg(3, 0), arg(4, 50));
     let chain = FakeChain::new(Shape { txs_per_block: txs, ..Default::default() }, head);
-    let url = chain.clone().serve(port).await;
+    let host = std::env::var("FAKECHAIN_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    let url = chain.clone().serve_on(&host, port).await;
     println!("fakechain on {url} head={head} block_ms={block_ms}");
     if block_ms > 0 {
         loop {

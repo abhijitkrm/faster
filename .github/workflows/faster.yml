@@ -1,12 +1,14 @@
-name: CI
+name: faster
 
 on:
   push:
     branches: [main, "release/**"]
+    paths: ["faster/**", ".github/workflows/faster.yml"]
   pull_request:
+    paths: ["faster/**", ".github/workflows/faster.yml"]
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: faster-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -26,7 +28,7 @@ jobs:
           --health-interval 5s --health-retries 20
     defaults:
       run:
-        working-directory: services/faster
+        working-directory: faster/services/faster
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev
@@ -35,7 +37,7 @@ jobs:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: services/faster
+          workspaces: faster/services/faster
       - run: cargo fmt --check
       - run: cargo build --locked --all-targets
       - name: tests (incl. ClickHouse CLOB integration)
@@ -50,14 +52,14 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: services/frontend
+        working-directory: faster/services/frontend
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: services/frontend/package-lock.json
+          cache-dependency-path: faster/services/frontend/package-lock.json
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
@@ -66,13 +68,13 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: services/clobarchiver
+        working-directory: faster/services/clobarchiver
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: services/clobarchiver/go.mod
-          cache-dependency-path: services/clobarchiver/go.sum
+          go-version-file: faster/services/clobarchiver/go.mod
+          cache-dependency-path: faster/services/clobarchiver/go.sum
       - run: go vet ./...
       - run: go test -race ./...
 
@@ -80,6 +82,9 @@ jobs:
     name: docker images
     runs-on: ubuntu-latest
     needs: [faster, frontend, clobarchiver]
+    defaults:
+      run:
+        working-directory: faster
     steps:
       - uses: actions/checkout@v4
       - run: docker compose build

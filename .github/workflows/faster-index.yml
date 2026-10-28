@@ -1,9 +1,11 @@
-name: CI
+name: faster-index
 
 on:
   push:
     branches: [main, dev]
+    paths: ["faster-index/**", ".github/workflows/faster-index.yml"]
   pull_request:
+    paths: ["faster-index/**", ".github/workflows/faster-index.yml"]
 
 jobs:
   test:
@@ -15,12 +17,16 @@ jobs:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
         options: --health-cmd pg_isready --health-interval 5s --health-retries 20
+    defaults:
+      run:
+        working-directory: faster-index
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: faster-index/package-lock.json
       - run: npm ci
       - run: npm test
       - name: tests against Postgres
@@ -38,5 +44,5 @@ jobs:
     needs: test
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t faster-index:ci .
+      - run: docker build -t faster-index:ci faster-index
       - run: docker run --rm faster-index:ci faster-index codegen

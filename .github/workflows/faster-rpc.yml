@@ -1,23 +1,30 @@
-name: CI
+name: faster-rpc
 
 on:
   push:
     branches: [main, dev]
+    paths: ["faster-rpc/**", ".github/workflows/faster-rpc.yml"]
   pull_request:
+    paths: ["faster-rpc/**", ".github/workflows/faster-rpc.yml"]
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: faster-rpc-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   rust:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: faster-rpc
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: faster-rpc
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --release
@@ -30,11 +37,11 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
-          context: .
+          context: faster-rpc
           load: true
           tags: faster-rpc:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=faster-rpc
+          cache-to: type=gha,mode=max,scope=faster-rpc
       - name: smoke test (starts without faster-sync, answers health)
         run: |
           docker run -d --name frpc --network host -e SYNC_URL=http://127.0.0.1:1 faster-rpc:ci
