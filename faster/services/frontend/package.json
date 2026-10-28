@@ -1,5 +1,6 @@
 {
   "name": "faster-explorer-frontend",
+  "license": "MIT OR Apache-2.0",
   "version": "1.0.0",
   "description": "Faster block explorer UI",
   "type": "module",

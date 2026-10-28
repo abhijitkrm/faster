@@ -3,7 +3,7 @@ name = "faster-sync-reth"
 version = "0.2.0"
 edition = "2021"
 description = "reth node with faster-sync built in (execution extension): blocks and receipts go straight into the store"
-license = "UNLICENSED"
+license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace]

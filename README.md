@@ -1,150 +1,247 @@
-# Faster
+<p align="center">
+  <img src="faster/docs/assets/banner.png" alt="Faster: real-time EVM explorer and chain data stack" width="100%">
+</p>
 
-Monorepo for the Faster stack: a real-time EVM block explorer plus a data
-layer that serves chain history from pre-built indexes instead of a node.
+<h1 align="center">Faster</h1>
 
-## Layout
+<p align="center">
+  <strong>A real-time block explorer and chain data stack for EVM networks.</strong><br>
+  Index any chain, browse it live, query its full history in milliseconds, and serve it over standard JSON-RPC and GraphQL.
+</p>
 
-| Directory | Language | Last release | What it is |
-|---|---|---|---|
-| [`faster/`](faster) | Rust + web UI | v1.0.0 | Real-time block explorer: indexer, REST API and WebSocket feed in one process over an embedded RocksDB store |
-| [`faster-sync/`](faster-sync) | Rust | v0.3.0 | Bulk historical data API: filtered blocks, txs, receipts, logs and traces across any block range, streamed as JSON or Arrow pages. [`faster-sync/reth/`](faster-sync/reth) is `faster-sync-reth`, a reth execution extension |
-| [`faster-rpc/`](faster-rpc) | Rust | v0.2.0 | Read-only Ethereum JSON-RPC served from faster-sync: archive-speed reads, uncapped `eth_getLogs`, WebSocket subscriptions; state methods forwarded upstream |
-| [`faster-index/`](faster-index) | TypeScript | v0.1.0 | Indexing framework: config + event handlers → entities → GraphQL, synced from faster-sync, reorg-safe, Postgres or embedded PGlite |
+<p align="center">
+  <a href="https://github.com/abhijitkrm/faster-mono/actions/workflows/stack.yml"><img src="https://github.com/abhijitkrm/faster-mono/actions/workflows/stack.yml/badge.svg" alt="stack"></a>
+  <a href="https://github.com/abhijitkrm/faster-mono/actions/workflows/faster-sync.yml"><img src="https://github.com/abhijitkrm/faster-mono/actions/workflows/faster-sync.yml/badge.svg" alt="faster-sync"></a>
+  <a href="https://github.com/abhijitkrm/faster-mono/actions/workflows/faster-rpc.yml"><img src="https://github.com/abhijitkrm/faster-mono/actions/workflows/faster-rpc.yml/badge.svg" alt="faster-rpc"></a>
+  <a href="https://github.com/abhijitkrm/faster-mono/actions/workflows/faster-index.yml"><img src="https://github.com/abhijitkrm/faster-mono/actions/workflows/faster-index.yml/badge.svg" alt="faster-index"></a>
+  <a href="https://github.com/abhijitkrm/faster-mono/actions/workflows/faster.yml"><img src="https://github.com/abhijitkrm/faster-mono/actions/workflows/faster.yml/badge.svg" alt="explorer"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0"></a>
+</p>
 
-Each directory is a self-contained project (its own Cargo workspace or npm
-package, Dockerfile, README, CHANGELOG); build and test from inside it. The
-directories were imported with `git subtree` from the original repos with their
-full commit history, so `git log -- faster-sync/` shows the project's whole past:
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#components">Components</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#performance">Performance</a> ·
+  <a href="#documentation">Docs</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
 
-| Directory | Imported from | Release history |
-|---|---|---|
-| `faster/` | [abhijitkrm/faster](https://github.com/abhijitkrm/faster) | [releases](https://github.com/abhijitkrm/faster/releases) |
-| `faster-sync/` | [abhijitkrm/faster-sync](https://github.com/abhijitkrm/faster-sync) | [releases](https://github.com/abhijitkrm/faster-sync/releases) |
-| `faster-rpc/` | [abhijitkrm/faster-rpc](https://github.com/abhijitkrm/faster-rpc) | [releases](https://github.com/abhijitkrm/faster-rpc/releases) |
-| `faster-index/` | [abhijitkrm/faster-index](https://github.com/abhijitkrm/faster-index) | [releases](https://github.com/abhijitkrm/faster-index/releases) |
+---
 
-## Run it
+Faster is an open-source stack for working with EVM chain data. It runs next
+to any node that speaks Ethereum JSON-RPC and gives you:
 
-Everything runs from the repo root with Docker Compose, through
-[`fasterctl`](fasterctl) or plain `docker compose`. Pick the parts you need:
+- **A live block explorer** that shows blocks, transactions, tokens and
+  contracts as they are produced, served from an embedded store with no
+  database hop.
+- **A history API** that returns the blocks, transactions, receipts, logs and
+  traces matching a filter across any block range, in milliseconds, as JSON or
+  Apache Arrow.
+- **A JSON-RPC server** that answers the standard read methods from that index,
+  so `eth_getLogs` over millions of blocks is cheap and your node is left to
+  execution.
+- **An indexing framework** that turns contract events into your own entities
+  with a GraphQL API, and handles reorgs for you.
 
-| Profile | Services | Ports |
-|---|---|---|
-| `explorer` | `faster` (indexer + API), `frontend` (web UI, nginx) | UI + API on 4000 |
-| `data` | `faster-sync`, `faster-rpc` | history API 3100, JSON-RPC 8545 |
-| `index` | `faster-sync`, `faster-index`, `postgres` | GraphQL 8080 |
-| `clob` | `clickhouse`, `clobarchiver` (CLOB archive for the explorer) | ClickHouse 8123 (localhost) |
-| `all` | explorer + data + index | |
-| `demo` | `fakechain`, a synthetic chain to point everything at | |
+Use the whole stack, or only the parts you need. Everything starts with one
+command.
 
-```sh
-git clone https://github.com/abhijitkrm/faster-mono && cd faster-mono
+<p align="center">
+  <img src="faster/docs/assets/home.png" alt="Faster explorer home page: latest blocks, throughput and live transactions" width="90%">
+</p>
 
-./fasterctl up demo          # whole stack on a synthetic chain, no node needed
+## Quick start
 
-cp .env.example .env         # then set RPC_URL to your node
-./fasterctl up all           # whole stack on a real chain
-./fasterctl up explorer      # only the explorer
-./fasterctl up data index    # faster-sync + faster-rpc + faster-index
-
-./fasterctl status           # which endpoints answer
-./fasterctl logs faster-sync
-./fasterctl down             # stop (down -v also deletes the data)
-```
-
-The same with Compose directly: `docker compose --profile all up -d --build`
-(add `--profile demo` for the synthetic chain).
-
-All settings are in [`.env.example`](.env.example): the node (`RPC_URL`),
-host ports, start blocks per service, request-rate cap for public endpoints
-(`SYNC_RPC_RPS=6` suits free endpoints), API keys, and which indexer project to
-run (`INDEX_PROJECT`, a directory inside `faster-index/`; the default is the
-ERC-20 example). Each service's full settings are in its project README.
-
-### Prebuilt images
-
-Releases push every image to `ghcr.io/abhijitkrm/<service>:<tag>`. To run those
-instead of building locally:
+You need Docker with Compose v2. Nothing else: the demo profile brings its own
+synthetic chain.
 
 ```sh
-IMAGE_REGISTRY=ghcr.io/abhijitkrm IMAGE_TAG=v0.1.0 ./fasterctl up all
+git clone https://github.com/abhijitkrm/faster-mono.git faster
+cd faster
+./fasterctl up demo
 ```
 
-### Binaries
+When the images are built and the stack is running:
 
-`./fasterctl build [dir]` builds native binaries into `./bin`: `faster`,
-`faster-sync`, `fakechain`, `faster-rpc` and the `faster-index` CLI (Node 22).
-`FASTER_RETH=1` adds `faster-sync-reth`, faster-sync inside a reth node.
-Needs Rust (stable), clang/libclang (RocksDB) and Node 22. Every binary is
-configured with environment variables, as listed in its project README; the
-explorer's web UI is served by nginx, so run it from Docker or build
-`faster/services/frontend` with `npm run build` and serve `dist/`.
-
-Releases attach the same set as `faster-<tag>-<linux-x86_64|linux-arm64|macos-arm64>.tar.gz`.
-
-## Releases and CI
-
-A `vX.Y.Z` tag on `main` runs [`release.yml`](.github/workflows/release.yml):
-binaries for three platforms on the GitHub release and all images on GHCR.
-Each project keeps its own version in its manifest and CHANGELOG.
-
-CI is one workflow per project, triggered only by changes under its directory
-(`faster.yml`, `faster-sync.yml`, `faster-sync-reth.yml`, `faster-rpc.yml`,
-`faster-index.yml`), plus [`stack.yml`](.github/workflows/stack.yml), which
-brings the whole stack up with `./fasterctl up demo` and checks every service
-end to end.
-
-## How they fit together
-
-```
-                  ┌──────────────────────────┐
-  EVM node ──RPC──▶       faster-sync        │◀── reth node (faster-sync-reth ExEx,
-  (any client)    │ Parquet chunks + fuse    │     in-process, no RPC hop)
-                  │ filters, RocksDB hot tail│
-                  └──────┬────────────┬──────┘
-                 Arrow / JSON pages   │
-                         │            │
-              ┌──────────▼───┐   ┌────▼──────────┐
-              │ faster-index │   │  faster-rpc   │── state calls ──▶ upstream node
-              │ handlers →   │   │ eth_* JSON-RPC│
-              │ GraphQL      │   │ + WebSocket   │
-              └──────────────┘   └───────────────┘
-
-  EVM node ──RPC──▶ faster (explorer: indexer + API + live UI)
-```
-
-- **faster-sync** ingests from any JSON-RPC node (or from inside reth via the
-  ExEx), cuts finalized history into immutable Parquet chunks with per-sub-group
-  binary fuse filters, keeps the unfinalized tail in RocksDB and rolls it back on
-  reorgs.
-- **faster-rpc** answers the standard block / transaction / receipt / log
-  methods from faster-sync and forwards everything else to an upstream node.
-- **faster-index** pages events out of faster-sync, runs your handlers, and
-  serves the entities over GraphQL, following the head and handling reorgs.
-- **faster** is the standalone explorer and runs directly against a node.
-
-## Highlights
-
-| | |
+| Open | What you get |
 |---|---|
-| faster-sync vs ClickHouse (synthetic 12M rows) | rare contract 3.4 ms vs 4.3 ms · busiest contract 49 ms vs 65 ms · wallet Transfers 3.4 ms vs 9.2 ms · 9M logs streamed 0.89 s vs 0.94 s |
-| faster-sync on Ethereum mainnet | Transfers filtered on a common topic value: 5–7 ms |
-| faster-rpc conformance vs reth (mainnet) | 550/550 and 221/221 identical responses; 389/389 through the reth ExEx under injected reorgs |
-| faster-index on mainnet | 320,366 USDT Transfers into 176,535 accounts in 16 s, balances exact |
-| faster explorer | ~250K tx/s ingest (synthetic), tx lookup 0.04 ms, ~90K req/s per instance |
+| http://localhost:4000 | Block explorer |
+| http://localhost:8545 | Ethereum JSON-RPC (faster-rpc) |
+| http://localhost:3100 | History API (faster-sync), see [API reference](faster-sync/docs/API.md) |
+| http://localhost:8080/graphql | GraphQL for the example indexer (faster-index) |
 
-Method and full numbers:
-[faster-sync/docs/BENCHMARK.md](faster-sync/docs/BENCHMARK.md),
-[faster-rpc/docs/CONFORMANCE.md](faster-rpc/docs/CONFORMANCE.md),
-[faster/docs/STORE.md](faster/docs/STORE.md).
+`./fasterctl status` shows which services are answering, `./fasterctl logs <service>`
+follows one, and `./fasterctl down` stops everything.
 
-## Roadmap
+### Run against your own chain
 
-- Run the full stack on a server next to a synced reth node: soak test and
-  reth-ExEx backfill benchmark.
-- Put the faster explorer on top of faster-sync and faster-rpc.
-- Production hardening: dashboards and alerts, chunk backups to object storage,
-  registry images.
-- Product gaps: faster-index loaders and multichain ordering, faster-rpc trace
-  methods, traces from the reth source.
+```sh
+cp .env.example .env
+# set RPC_URL to your node, e.g. RPC_URL=http://my-node:8545
+./fasterctl up all
+```
+
+Pick only what you need with profiles:
+
+| Profile | Starts | Use it for |
+|---|---|---|
+| `explorer` | explorer indexer + API, web UI | A block explorer for your chain |
+| `data` | faster-sync, faster-rpc | Fast history queries and a read-scalable RPC endpoint |
+| `index` | faster-sync, faster-index, Postgres | Building an app backend on your contracts' events |
+| `all` | all of the above | The full stack |
+| `demo` | a synthetic chain | Trying Faster without a node |
+| `clob` | ClickHouse, CLOB archiver | Order-book history for CLOB chains (optional) |
+
+```sh
+./fasterctl up explorer        # only the explorer
+./fasterctl up data index      # history API, JSON-RPC and an indexer
+```
+
+Every setting (node URL, ports, start blocks, rate limits for public endpoints,
+API keys, which indexer project to run) is documented in
+[`.env.example`](.env.example). Plain `docker compose --profile <name> up -d`
+works too.
+
+## Components
+
+| | Component | Language | What it does |
+|---|---|---|---|
+| 🔎 | [**Explorer**](faster) | Rust, TypeScript | Indexer, REST API and WebSocket feed in a single process over an embedded RocksDB store, with a React UI. Verified contracts, decoded calls and events, tokens and holders, internal transactions, reorg handling. |
+| ⚡ | [**faster-sync**](faster-sync) | Rust | Historical data API. Finalized history lives in immutable Parquet chunks with per-chunk filters; the unfinalized tip lives in RocksDB and rolls back on reorgs. Ingests over JSON-RPC, or in-process from reth through an [execution extension](faster-sync/reth). Clients for [Rust](faster-sync/clients/rust) and [TypeScript](faster-sync/clients/ts). |
+| 🔌 | [**faster-rpc**](faster-rpc) | Rust | Ethereum JSON-RPC served from faster-sync: blocks, transactions, receipts, `eth_getLogs` over any range, and WebSocket `newHeads`/`logs` subscriptions with reorg notifications. State calls and writes are forwarded to your node. |
+| 🧩 | [**faster-index**](faster-index) | TypeScript | Indexing framework: declare contracts and events in YAML, write handlers in TypeScript, get Postgres entities and a GraphQL API. Backfills from faster-sync, follows the head and rolls back on reorgs. |
+
+Each component is a self-contained project with its own README, tests and
+Dockerfile, and can be deployed on its own.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    node[("EVM node<br/>JSON-RPC")]
+    reth[("reth node<br/>+ faster-sync ExEx")]
+
+    subgraph data [Data layer]
+        sync["faster-sync<br/>Parquet chunks + filters<br/>RocksDB hot tip"]
+    end
+
+    rpc["faster-rpc<br/>eth_* JSON-RPC + WebSocket"]
+    index["faster-index<br/>handlers → Postgres → GraphQL"]
+    explorer["Explorer<br/>indexer + API + UI"]
+
+    node -- blocks, receipts, traces --> sync
+    reth -. in-process .-> sync
+    sync -- Arrow / JSON pages --> rpc
+    sync -- Arrow / JSON pages --> index
+    rpc -- state calls, writes --> node
+    node -- blocks --> explorer
+
+    apps(["dapps, wallets,<br/>analytics"])
+    rpc --> apps
+    index --> apps
+    explorer --> users(["users"])
+```
+
+- **Ingest once, serve many.** faster-sync reads each block from the node
+  once. faster-rpc and faster-index read from faster-sync, not the node.
+- **History is immutable.** Finalized blocks are written to Parquet chunks
+  that never change, with binary fuse filters over addresses, topics, senders
+  and selectors. A query skips every part of a chunk that cannot match, and
+  reads only the columns and pages it needs.
+- **The tip is mutable.** Recent blocks live in RocksDB with parent-hash
+  checks. A reorg rolls them back, and every consumer sees it: faster-rpc
+  sends `removed: true` logs, faster-index reverts its entities.
+
+## Performance
+
+Measured on a laptop. Methods, hardware and full results are in the linked
+documents.
+
+| | Result |
+|---|---|
+| History query, one contract's logs across the whole chain | **3.4 ms** (ClickHouse, best layout: 4.3 ms) |
+| History query, busiest contract (511K logs) | **49 ms** (ClickHouse: 65 ms) |
+| History query on Ethereum mainnet, filtered by a common topic value | **5–7 ms** |
+| JSON-RPC conformance against reth on Ethereum mainnet | **550 / 550** and **221 / 221** identical responses; 389 / 389 through the reth extension under injected reorgs |
+| Indexing all USDT `Transfer` events over 3,163 mainnet blocks | **16 s** for 320,366 events, every balance exact |
+| Explorer ingest (synthetic chain) | **~250K tx/s** sustained |
+| Explorer lookups | transaction by hash **0.04 ms** server time, ~90K req/s per instance |
+
+Sources: [faster-sync benchmark](faster-sync/docs/BENCHMARK.md) ·
+[faster-rpc conformance](faster-rpc/docs/CONFORMANCE.md) ·
+[explorer store](faster/docs/STORE.md) ·
+[storage engine comparison](faster/docs/STORAGE_BENCHMARK.md)
+
+## Installation
+
+**Docker (recommended).** `./fasterctl up <profile>` builds the images from
+source and starts them. Release builds also publish images to the GitHub
+Container Registry; to use them instead of building:
+
+```sh
+IMAGE_REGISTRY=ghcr.io/abhijitkrm IMAGE_TAG=<release tag> ./fasterctl up all
+```
+
+**Binaries.** Tagged [releases](https://github.com/abhijitkrm/faster-mono/releases)
+ships `faster`, `faster-sync`, `faster-rpc` and the `faster-index` CLI for
+Linux (x86_64, arm64) and macOS (arm64).
+
+**From source.** With Rust (stable), clang and Node.js 22:
+
+```sh
+./fasterctl build          # binaries into ./bin
+FASTER_RETH=1 ./fasterctl build   # also build faster-sync-reth
+```
+
+All services are configured with environment variables, listed in each
+component's README.
+
+## Documentation
+
+| Topic | Document |
+|---|---|
+| Explorer: setup, configuration, API | [faster/README.md](faster/README.md), [API](faster/docs/API.md), [deployment](faster/docs/DEPLOYMENT.md) |
+| faster-sync: query API, Arrow streaming, clients | [faster-sync/README.md](faster-sync/README.md), [API](faster-sync/docs/API.md) |
+| faster-sync inside reth | [faster-sync/reth/README.md](faster-sync/reth/README.md) |
+| faster-rpc: supported methods, forwarding, limits | [faster-rpc/README.md](faster-rpc/README.md), [conformance](faster-rpc/docs/CONFORMANCE.md) |
+| faster-index: config, schema, handlers, GraphQL | [faster-index/README.md](faster-index/README.md), [example](faster-index/examples/erc20) |
+| CLOB order-book archive | [faster/docs/CLOB_ARCHIVE.md](faster/docs/CLOB_ARCHIVE.md) |
+
+## Project status
+
+Faster is young and moving quickly. The explorer is at v1; faster-sync,
+faster-rpc and faster-index are pre-1.0, and their storage formats and APIs may
+change between minor versions (a format change always comes with a clear
+rebuild message, never silent corruption). Each component's CHANGELOG lists
+what changed.
+
+On the roadmap:
+
+- Long-running soak tests next to a synced reth node, and reth backfill benchmarks
+- The explorer reading from faster-sync and faster-rpc
+- Dashboards, alerts and chunk backups to object storage
+- Trace methods in faster-rpc, multichain ordering in faster-index
+
+Ideas and feedback are welcome in [issues](https://github.com/abhijitkrm/faster-mono/issues).
+
+## Contributing
+
+Contributions are welcome: bug reports, docs, benchmarks on other chains, and
+code. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup and
+how each component is tested. To report a security issue, see
+[SECURITY.md](SECURITY.md).
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the work by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or
+conditions.

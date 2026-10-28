@@ -5,6 +5,7 @@ edition = "2021"
 description = "Faster explorer: RocksDB hot store, chain indexer and explorer API in one process"
 publish = false
 default-run = "faster"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 alloy-dyn-abi = "1"

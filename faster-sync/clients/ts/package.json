@@ -2,7 +2,7 @@
   "name": "faster-sync-client",
   "version": "0.1.0",
   "description": "TypeScript client for faster-sync: bulk historical EVM data queries with paging, tip following and reorg detection",
-  "license": "UNLICENSED",
+  "license": "MIT OR Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

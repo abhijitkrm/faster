@@ -2,7 +2,7 @@
   "name": "faster-index",
   "version": "0.1.0",
   "description": "EVM indexing framework on faster-sync: typed event handlers, Postgres entities with reorg rollback, generated GraphQL API",
-  "license": "UNLICENSED",
+  "license": "MIT OR Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
