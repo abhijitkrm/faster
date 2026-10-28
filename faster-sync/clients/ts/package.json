@@ -1,0 +1,19 @@
+{
+  "name": "faster-sync-client",
+  "version": "0.1.0",
+  "description": "TypeScript client for faster-sync: bulk historical EVM data queries with paging, tip following and reorg detection",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "tsc -p . && node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.6.3"
+  },
+  "engines": { "node": ">=20" }
+}

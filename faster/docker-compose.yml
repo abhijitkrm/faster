@@ -1,0 +1,135 @@
+services:
+  # Faster: RocksDB hot store + chain indexer + explorer REST/WebSocket API + CLOB API in one process.
+  faster:
+    build:
+      context: ./services/faster
+      dockerfile: Dockerfile
+    image: faster:faster
+    container_name: faster-faster
+    # Not published: the frontend nginx is the only public entry point and
+    # proxies /api, /stats and /ws here.
+    environment:
+      RPC_URL: ${RPC_URL}
+      PORT: 3000
+      DATA_DIR: /data
+      START_BLOCK: ${START_BLOCK:-0}
+      CONFIRMATIONS: ${CONFIRMATIONS:-0}
+      REORG_DEPTH: ${REORG_DEPTH:-256}
+      FETCH_BATCH: ${FETCH_BATCH:-10}
+      FETCH_CONCURRENCY: ${FETCH_CONCURRENCY:-16}
+      CACHE_MB: ${CACHE_MB:-512}
+      TRACE_CALLS: ${TRACE_CALLS:-false}
+      VERIFIER_ENABLED: ${VERIFIER_ENABLED:-true}
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DB: clob
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clob}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clob}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Metrics + /admin/checkpoint; reachable on the compose network only.
+      ADMIN_ADDR: 0.0.0.0:9100
+      BACKUP_DIR: /data/backups
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-100}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-200}
+      # Safe only because nothing but the frontend nginx can reach this port.
+      TRUST_PROXY_HEADERS: "true"
+    volumes:
+      - faster-data:/data
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - explorer-network
+
+  # ClickHouse: CLOB history archive (database/clickhouse/*.sql applied on first start)
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: faster-clickhouse
+    environment:
+      CLICKHOUSE_DB: clob
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clob}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clob}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./database/clickhouse:/docker-entrypoint-initdb.d:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+      nproc: 65535
+    cap_add:
+      - SYS_NICE
+      - IPC_LOCK
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user \"$$CLICKHOUSE_USER\" --password \"$$CLICKHOUSE_PASSWORD\" -q 'SELECT 1' >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - explorer-network
+
+  # CLOB archiver: node clob_getBlockArchive -> ClickHouse
+  clobarchiver:
+    build:
+      context: ./services/clobarchiver
+      dockerfile: Dockerfile
+    image: faster:clobarchiver
+    container_name: faster-clobarchiver
+    environment:
+      NODE_RPC: ${NODE_RPC:-http://host.docker.internal:8545}
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_DB: clob
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clob}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clob}
+      FETCH_WORKERS: ${CLOB_FETCH_WORKERS:-8}
+      BATCH_MAX_ROWS: ${CLOB_BATCH_MAX_ROWS:-100000}
+      BATCH_MAX_HEIGHTS: ${CLOB_BATCH_MAX_HEIGHTS:-1000}
+      POLL_MS: ${CLOB_POLL_MS:-1000}
+      START_HEIGHT: ${CLOB_START_HEIGHT:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - explorer-network
+
+  # UI + public entry point: nginx serves the app and proxies the API to faster.
+  frontend:
+    build:
+      context: ./services/frontend
+      dockerfile: Dockerfile
+    image: faster:frontend
+    container_name: faster-frontend
+    ports:
+      - "${HTTP_PORT:-4000}:8080"
+    environment:
+      FASTER_UPSTREAM: faster:3000
+      # Empty: the UI calls the API on its own origin (proxied above).
+      FASTER_API_URL: ${FASTER_API_URL:-}
+    depends_on:
+      - faster
+    restart: unless-stopped
+    networks:
+      - explorer-network
+
+volumes:
+  faster-data:
+    driver: local
+  clickhouse-data:
+    driver: local
+
+networks:
+  explorer-network:
+    driver: bridge

@@ -1,0 +1,46 @@
+== mdbx: loading 500000 blocks / 5000000 txs
+  load 284.7s  = 17560 tx/s ingest  size 3.22 GB
+  tx by hash                 p50   3.833µs  p99   8.917µs  p99.9   17.75µs  1-thread   242751 ops/s
+  latest 20 blocks           p50   1.708µs  p99   2.041µs  p99.9   8.667µs  1-thread   557174 ops/s
+  addr page warm (25)        p50  30.625µs  p99  48.917µs  p99.9  65.041µs  1-thread    31841 ops/s
+  addr page hot (25)         p50   9.333µs  p99   12.25µs  p99.9  28.875µs  1-thread   104811 ops/s
+  addr page hot deep (25)    p50  10.417µs  p99  12.334µs  p99.9  29.125µs  1-thread    94846 ops/s
+  range scan to=X 100k blk   p50 154.18125ms  p99 156.508959ms  p99.9 156.508959ms  1-thread        6 ops/s
+  agg full history           p50 803.240708ms  p99 805.32675ms  p99.9 805.32675ms  1-thread        1 ops/s
+  tx by hash                 8 threads    1032614 ops/s
+  addr page warm (25)        8 threads     213580 ops/s
+== pebble: loading 500000 blocks / 5000000 txs
+  load 19.8s  = 252713 tx/s ingest  size 1.19 GB
+  tx by hash                 p50   21.75µs  p99   50.75µs  p99.9     145µs  1-thread    43026 ops/s
+  latest 20 blocks           p50   6.083µs  p99   7.959µs  p99.9  32.958µs  1-thread   158591 ops/s
+  addr page warm (25)        p50 118.084µs  p99   239.5µs  p99.9 1.864416ms  1-thread     7618 ops/s
+  addr page hot (25)         p50  17.708µs  p99  24.333µs  p99.9  64.959µs  1-thread    54139 ops/s
+  addr page hot deep (25)    p50  63.125µs  p99  93.041µs  p99.9 245.792µs  1-thread    15437 ops/s
+  range scan to=X 100k blk   p50 85.0985ms  p99 173.253333ms  p99.9 173.253333ms  1-thread       11 ops/s
+  agg full history           p50 491.342333ms  p99 491.769167ms  p99.9 491.769167ms  1-thread        2 ops/s
+  tx by hash                 8 threads     297760 ops/s
+  addr page warm (25)        8 threads      39510 ops/s
+    data/pg/rt/bin/pg_ctl -D data/pg/data -l logfile start
+== postgres: loading 500000 blocks / 5000000 txs
+  load 126.9s  = 39405 tx/s ingest  size 3.81 GB
+  tx by hash                 p50  38.666µs  p99 1.036542ms  p99.9 21.827917ms  1-thread     6720 ops/s
+  latest 20 blocks           p50  43.625µs  p99 5.295125ms  p99.9 22.293833ms  1-thread     3901 ops/s
+  addr page warm (25)        p50 662.584µs  p99 34.247792ms  p99.9 83.856333ms  1-thread      298 ops/s
+  addr page hot (25)         p50 497.458µs  p99 9.738167ms  p99.9 37.575667ms  1-thread     1091 ops/s
+  addr page hot deep (25)    p50 116.083µs  p99 296.417µs  p99.9   618.5µs  1-thread     7566 ops/s
+  range scan to=X 100k blk   p50 178.719041ms  p99 189.307958ms  p99.9 189.307958ms  1-thread        6 ops/s
+  agg full history           p50 236.10825ms  p99 242.661084ms  p99.9 242.661084ms  1-thread        4 ops/s
+  tx by hash                 8 threads      52722 ops/s
+  addr page warm (25)        8 threads       7081 ops/s
+== clickhouse: loading 500000 blocks / 5000000 txs
+  load 142.7s  = 35037 tx/s ingest  size 0.47 GB
+  tx by hash                 p50 3.347291ms  p99 17.498708ms  p99.9 40.934792ms  1-thread      247 ops/s
+  latest 20 blocks           p50 1.170875ms  p99 1.484167ms  p99.9 1.733459ms  1-thread      842 ops/s
+  addr page warm (25)        p50 6.106542ms  p99 24.010084ms  p99.9 35.140833ms  1-thread      154 ops/s
+  addr page hot (25)         p50 4.123667ms  p99 4.659625ms  p99.9 5.283333ms  1-thread      242 ops/s
+  addr page hot deep (25)    p50   8.682ms  p99 9.241083ms  p99.9 9.877834ms  1-thread      115 ops/s
+  range scan to=X 100k blk   p50 5.305375ms  p99 5.854834ms  p99.9 5.854834ms  1-thread      181 ops/s
+  agg full history           p50 5.430917ms  p99 5.438791ms  p99.9 5.438791ms  1-thread      184 ops/s
+  tx by hash                 8 threads       1361 ops/s
+  addr page warm (25)        8 threads        426 ops/s
+DONE

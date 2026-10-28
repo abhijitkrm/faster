@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# fasterctl: run the Faster stack, or build its binaries.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+usage() {
+  cat <<'U'
+fasterctl <command>
+
+  up <profile>...   start services with Docker Compose (builds images first)
+                    profiles: explorer, data, index, clob, all, demo
+                    "demo" alone = demo chain + all
+  down [-v]         stop everything (-v also deletes the data volumes)
+  ps                list running services
+  logs [service]    follow logs
+  status            check every running service's endpoint
+  build [dir]       build native binaries into dir (default ./bin):
+                    faster, faster-sync, fakechain, faster-rpc, and the
+                    faster-index CLI; add FASTER_RETH=1 for faster-sync-reth
+
+Images are built locally unless IMAGE_TAG names a release, e.g.
+  IMAGE_REGISTRY=ghcr.io/abhijitkrm IMAGE_TAG=v0.1.0 ./fasterctl up all
+
+Settings: .env (copy .env.example). Examples:
+  ./fasterctl up demo                    everything on a synthetic chain
+  RPC_URL=https://… ./fasterctl up all   everything on a real chain
+  ./fasterctl up explorer                only the block explorer
+  ./fasterctl up data                    faster-sync + faster-rpc
+U
+}
+
+compose() { docker compose "$@"; }
+
+rpc_url() {
+  local v="${RPC_URL:-}"
+  if [[ -z "$v" && -f .env ]]; then v=$(sed -n 's/^RPC_URL=//p' .env | tail -1); fi
+  echo "$v"
+}
+
+up() {
+  [[ $# -gt 0 ]] || { usage; exit 1; }
+  local args=() p demo=0
+  for p in "$@"; do
+    case "$p" in
+      explorer|data|index|clob|all) args+=(--profile "$p") ;;
+      demo) demo=1; args+=(--profile demo) ;;
+      *) echo "unknown profile: $p" >&2; exit 1 ;;
+    esac
+  done
+  if [[ $demo == 1 && $# == 1 ]]; then args+=(--profile all); fi
+  if [[ $demo == 0 && -z "$(rpc_url)" ]]; then
+    echo "RPC_URL is not set (in .env or the environment): set it, or add the demo profile" >&2
+    exit 1
+  fi
+  if [[ $demo == 1 && -n "$(rpc_url)" ]]; then
+    echo "note: RPC_URL is set, so services read from it, not the demo chain" >&2
+  fi
+  local tag="${IMAGE_TAG:-}"
+  if [[ -z "$tag" && -f .env ]]; then tag=$(sed -n 's/^IMAGE_TAG=//p' .env | tail -1); fi
+  if [[ -n "$tag" && "$tag" != local ]]; then
+    compose "${args[@]}" pull
+    compose "${args[@]}" up -d --no-build
+  else
+    compose "${args[@]}" up -d --build
+  fi
+  echo
+  status
+}
+
+check() {
+  local name=$1 url=$2
+  if curl -fs -m 3 "$url" >/dev/null 2>&1; then printf '  %-13s up    %s\n' "$name" "$url"
+  else printf '  %-13s down  %s\n' "$name" "$url"; fi
+}
+
+status() {
+  local running
+  [[ -f .env ]] && set -a && . ./.env && set +a
+  running=$(compose ps --services --status running 2>/dev/null || true)
+  echo "services:"
+  grep -qx frontend <<<"$running" && check explorer "http://localhost:${EXPLORER_PORT:-4000}/"
+  grep -qx faster-sync <<<"$running" && check faster-sync "http://localhost:${SYNC_PORT:-3100}/health"
+  grep -qx faster-rpc <<<"$running" && check faster-rpc "http://localhost:${RPC_PORT:-8545}/health"
+  grep -qx faster-index <<<"$running" && check faster-index "http://localhost:${INDEX_PORT:-8080}/healthz"
+  [[ -n "$running" ]] || echo "  (none running)"
+  return 0
+}
+
+build() {
+  local out; out=$(mkdir -p "${1:-bin}" && cd "${1:-bin}" && pwd)
+  echo "building into $out"
+  (cd faster/services/faster && cargo build --release --locked && cp target/release/faster "$out/")
+  (cd faster-sync && cargo build --release --locked --bin faster-sync --bin fakechain \
+    && cp target/release/faster-sync target/release/fakechain "$out/")
+  (cd faster-rpc && cargo build --release --locked --bin faster-rpc && cp target/release/faster-rpc "$out/")
+  if [[ "${FASTER_RETH:-0}" == 1 ]]; then
+    (cd faster-sync/reth && cargo build --release --locked && cp target/release/faster-sync-reth "$out/")
+  fi
+  (cd faster-index && npm ci --no-audit --no-fund && npx tsc -p . && npm prune --omit=dev --no-audit --no-fund \
+    && rm -rf "$out/faster-index.d" && mkdir -p "$out/faster-index.d" \
+    && cp -R dist node_modules package.json "$out/faster-index.d/" \
+    && printf '#!/bin/sh\nexec node "$(dirname "$0")/faster-index.d/dist/cli.js" "$@"\n' > "$out/faster-index" \
+    && chmod +x "$out/faster-index")
+  echo; ls -1 "$out"
+}
+
+cmd=${1:-help}; shift || true
+case "$cmd" in
+  up) up "$@" ;;
+  down) compose --profile '*' down "$@" ;;
+  ps) compose --profile '*' ps ;;
+  logs) compose --profile '*' logs -f "$@" ;;
+  status) status ;;
+  build) build "$@" ;;
+  help|-h|--help) usage ;;
+  *) echo "unknown command: $cmd" >&2; usage; exit 1 ;;
+esac

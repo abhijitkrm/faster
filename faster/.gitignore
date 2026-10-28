@@ -1,0 +1,23 @@
+node_modules/
+*.log
+npm-debug.log*
+.env.local
+.env.*.local
+dist/
+build/
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.pid
+postgres-data/
+redis-data/
+prometheus-data/
+.next/
+out/
+.env
+
+# local release plan
+plan.md

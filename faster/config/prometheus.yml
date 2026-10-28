@@ -1,0 +1,9 @@
+# Scrape config for the faster service (metrics on its internal ADMIN_ADDR).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: faster
+    static_configs:
+      - targets: ['faster:9100']

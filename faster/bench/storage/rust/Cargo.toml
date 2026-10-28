@@ -1,0 +1,20 @@
+[package]
+name = "rsbench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rocksdb = { version = "0.22", default-features = false, features = ["lz4"] }
+redb = "2.1"
+fjall = "2"
+sha2 = "0.10"
+rand = "0.8"
+rand_distr = "0.4"
+parking_lot = { version = "0.12", features = ["arc_lock"] }
+qmdb = { git = "https://github.com/LayerZero-Labs/qmdb", rev = "f14a2a0" }
+qmdb-common = { git = "https://github.com/LayerZero-Labs/qmdb", rev = "f14a2a0" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,12 @@
+== duckdb: loading 500000 blocks / 5000000 txs
+  load 32.2s  = 155230 tx/s ingest  size 1.27 GB
+  tx by hash                 p50   184.5µs  p99  308.25µs  p99.9 463.125µs  1-thread     5227 ops/s
+  latest 20 blocks           p50 3.210083ms  p99 3.660083ms  p99.9 3.91575ms  1-thread      309 ops/s
+  addr page warm (25)        p50 21.981791ms  p99 26.062667ms  p99.9 31.21625ms  1-thread       45 ops/s
+  addr page hot (25)         p50  28.647ms  p99 50.643916ms  p99.9 65.485917ms  1-thread       34 ops/s
+  addr page hot deep (25)    p50 32.3445ms  p99 56.618208ms  p99.9 119.249875ms  1-thread       29 ops/s
+  range scan to=X 100k blk   p50 9.127333ms  p99 10.551833ms  p99.9 10.551833ms  1-thread      108 ops/s
+  agg full history           p50 8.641583ms  p99 9.010375ms  p99.9 9.010375ms  1-thread      115 ops/s
+  tx by hash                 8 threads      11788 ops/s
+  addr page warm (25)        8 threads         45 ops/s
+DONE

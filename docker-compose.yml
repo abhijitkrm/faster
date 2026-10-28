@@ -1,0 +1,183 @@
+# The whole Faster stack. Pick what to run with profiles (or ./fasterctl):
+#
+#   explorer   block explorer: faster (indexer + API) and the web UI
+#   data       faster-sync (history API) and faster-rpc (JSON-RPC)
+#   index      faster-index (GraphQL indexer) on faster-sync, with Postgres
+#   clob       CLOB archive: ClickHouse and clobarchiver (for the explorer)
+#   all        explorer + data + index
+#   demo       a synthetic chain to point everything at (no node needed)
+#
+#   docker compose --profile all up -d --build
+#   docker compose --profile demo --profile all up -d --build
+#
+# Settings come from .env (see .env.example). RPC_URL is the node every
+# service reads from; unset, it defaults to the demo chain.
+
+x-node: &node ${RPC_URL:-http://fakechain:8545}
+
+services:
+  # ---- demo -------------------------------------------------------------
+  fakechain:
+    profiles: [demo]
+    build: ./faster-sync
+    image: ${IMAGE_REGISTRY:-faster}/faster-sync:${IMAGE_TAG:-local}
+    command: ["fakechain", "8545", "${DEMO_HEAD:-5000}", "${DEMO_BLOCK_MS:-1000}", "${DEMO_TXS:-50}"]
+    environment:
+      FAKECHAIN_HOST: 0.0.0.0
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs -XPOST -H 'content-type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_chainId\",\"params\":[]}' http://localhost:8545"]
+      interval: 10s
+    restart: unless-stopped
+
+  # ---- explorer ---------------------------------------------------------
+  faster:
+    profiles: [explorer, all]
+    build: ./faster/services/faster
+    image: ${IMAGE_REGISTRY:-faster}/faster:${IMAGE_TAG:-local}
+    environment:
+      RPC_URL: *node
+      PORT: 3000
+      DATA_DIR: /data
+      START_BLOCK: ${EXPLORER_START_BLOCK:-0}
+      CONFIRMATIONS: ${CONFIRMATIONS:-0}
+      REORG_DEPTH: ${REORG_DEPTH:-256}
+      FETCH_BATCH: ${FETCH_BATCH:-10}
+      FETCH_CONCURRENCY: ${FETCH_CONCURRENCY:-16}
+      CACHE_MB: ${CACHE_MB:-512}
+      TRACE_CALLS: ${TRACE_CALLS:-false}
+      VERIFIER_ENABLED: ${VERIFIER_ENABLED:-true}
+      # Set to http://clickhouse:8123 with the clob profile.
+      CLICKHOUSE_URL: ${EXPLORER_CLICKHOUSE_URL:-}
+      CLICKHOUSE_DB: clob
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clob}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clob}
+      ADMIN_ADDR: 0.0.0.0:9100
+      BACKUP_DIR: /data/backups
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-100}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-200}
+      # Safe only because nothing but the frontend nginx can reach this port.
+      TRUST_PROXY_HEADERS: "true"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes: [faster-data:/data]
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  frontend:
+    profiles: [explorer, all]
+    build: ./faster/services/frontend
+    image: ${IMAGE_REGISTRY:-faster}/frontend:${IMAGE_TAG:-local}
+    ports: ["${EXPLORER_PORT:-4000}:8080"]
+    environment:
+      FASTER_UPSTREAM: faster:3000
+      FASTER_API_URL: ${FASTER_API_URL:-}
+    depends_on: [faster]
+    restart: unless-stopped
+
+  # ---- clob -------------------------------------------------------------
+  clickhouse:
+    profiles: [clob]
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_DB: clob
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clob}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clob}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports: ["127.0.0.1:8123:8123"]
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./faster/database/clickhouse:/docker-entrypoint-initdb.d:ro
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user \"$$CLICKHOUSE_USER\" --password \"$$CLICKHOUSE_PASSWORD\" -q 'SELECT 1' >/dev/null"]
+      interval: 10s
+      retries: 10
+    restart: unless-stopped
+
+  clobarchiver:
+    profiles: [clob]
+    build: ./faster/services/clobarchiver
+    image: ${IMAGE_REGISTRY:-faster}/clobarchiver:${IMAGE_TAG:-local}
+    environment:
+      NODE_RPC: ${CLOB_NODE_RPC:-http://host.docker.internal:8545}
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_DB: clob
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clob}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clob}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on:
+      clickhouse: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ---- data -------------------------------------------------------------
+  faster-sync:
+    profiles: [data, index, all]
+    build: ./faster-sync
+    image: ${IMAGE_REGISTRY:-faster}/faster-sync:${IMAGE_TAG:-local}
+    ports: ["${SYNC_PORT:-3100}:3100"]
+    environment:
+      RPC_URL: *node
+      START_BLOCK: ${SYNC_START_BLOCK:-0}
+      TRACES: ${SYNC_TRACES:-false}
+      RPC_RPS: ${SYNC_RPC_RPS:-0}
+      FINALITY_DEPTH: ${SYNC_FINALITY_DEPTH:-64}
+      API_KEYS: ${SYNC_API_KEYS:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes: [sync-data:/data]
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  faster-rpc:
+    profiles: [data, all]
+    build: ./faster-rpc
+    image: ${IMAGE_REGISTRY:-faster}/faster-rpc:${IMAGE_TAG:-local}
+    ports: ["${RPC_PORT:-8545}:8545"]
+    environment:
+      SYNC_URL: http://faster-sync:3100
+      SYNC_API_KEY: ${SYNC_API_KEY:-}
+      UPSTREAM_URL: *node
+      API_KEYS: ${RPC_API_KEYS:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on: [faster-sync]
+    restart: unless-stopped
+
+  # ---- index ------------------------------------------------------------
+  postgres:
+    profiles: [index, all]
+    image: postgres:16
+    environment:
+      POSTGRES_USER: findex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-findex}
+      POSTGRES_DB: findex
+    volumes: [pg-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "findex"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  faster-index:
+    profiles: [index, all]
+    build:
+      context: ./faster-index
+      args:
+        # A project directory inside faster-index/ (faster-index.yaml, schema, handlers).
+        PROJECT: ${INDEX_PROJECT:-examples/erc20}
+    image: ${IMAGE_REGISTRY:-faster}/faster-index:${IMAGE_TAG:-local}
+    ports: ["${INDEX_PORT:-8080}:8080"]
+    environment:
+      SYNC_URL: http://faster-sync:3100
+      START_BLOCK: ${INDEX_START_BLOCK:-0}
+      DATABASE_URL: postgres://findex:${POSTGRES_PASSWORD:-findex}@postgres:5432/findex
+    depends_on:
+      postgres: { condition: service_healthy }
+      faster-sync: { condition: service_started }
+    restart: unless-stopped
+
+volumes:
+  faster-data:
+  clickhouse-data:
+  sync-data:
+  pg-data:

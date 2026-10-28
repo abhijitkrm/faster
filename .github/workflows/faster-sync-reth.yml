@@ -1,0 +1,38 @@
+name: faster-sync reth ExEx
+
+on:
+  push:
+    branches: [main, dev, "dev-*"]
+    paths: ["faster-sync/reth/**", "faster-sync/src/**", "faster-sync/Cargo.toml", ".github/workflows/faster-sync-reth.yml"]
+  pull_request:
+    paths: ["faster-sync/reth/**", "faster-sync/src/**", "faster-sync/Cargo.toml", ".github/workflows/faster-sync-reth.yml"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: faster-sync/reth
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: faster-sync/reth
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --release -- -D warnings
+      - name: dev chain smoke test (reth --dev → ExEx → faster-sync API)
+        run: |
+          cargo build --locked --release
+          FSYNC_DATA_DIR=/tmp/fsync LISTEN=127.0.0.1:3100 FINALITY_DEPTH=2 \
+            ./target/release/faster-sync-reth node --dev --dev.block-time 1s --datadir /tmp/reth --http --ipcdisable > /tmp/node.log 2>&1 &
+          for i in $(seq 90); do
+            h=$(curl -fs http://127.0.0.1:3100/height | python3 -c 'import sys,json;print(json.load(sys.stdin)["height"] or 0)' || echo 0)
+            [ "$h" -ge 5 ] && break; sleep 1
+          done
+          curl -fs http://127.0.0.1:3100/status
+          test "$h" -ge 5 || { tail -50 /tmp/node.log; exit 1; }

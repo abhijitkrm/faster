@@ -1,0 +1,29 @@
+[package]
+name = "faster-rpc"
+version = "0.2.0"
+edition = "2021"
+description = "Read-only Ethereum JSON-RPC served from faster-sync, with an upstream node for state methods"
+license = "UNLICENSED"
+publish = false
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+futures = "0.3"
+lru = "0.16"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net"] }
+tower-http = { version = "0.6", features = ["compression-gzip"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.26"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

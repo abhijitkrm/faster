@@ -1,0 +1,17 @@
+type Account @entity {
+  id: ID!
+  balance: BigInt!
+  transfersIn: Int!
+  transfersOut: Int!
+  transfers: [Transfer!]! @derivedFrom(field: "from")
+}
+
+type Transfer @entity {
+  id: ID!
+  from: Account!
+  to: Account!
+  value: BigInt!
+  block: Int! @index
+  timestamp: Int!
+  txHash: Bytes!
+}
