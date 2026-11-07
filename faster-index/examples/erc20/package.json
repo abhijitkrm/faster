@@ -1,5 +1,6 @@
 {
   "name": "usdt-balances",
+  "license": "MIT OR Apache-2.0",
   "private": true,
   "type": "module",
   "scripts": { "codegen": "faster-index codegen", "dev": "faster-index dev", "start": "faster-index start" },

@@ -3,7 +3,7 @@ name = "faster-sync-client"
 version = "0.1.0"
 edition = "2021"
 description = "Rust client for faster-sync: paged queries (JSON or Arrow), tip following, reorg detection"
-license = "UNLICENSED"
+license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
