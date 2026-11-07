@@ -3,15 +3,7 @@ name: stack
 # Brings the whole stack up with ./fasterctl on the demo chain and checks every
 # service end to end.
 on:
-  push:
-    branches: [main]
-    paths: ["docker-compose.yml", "fasterctl", ".env.example", "**/Dockerfile", ".github/workflows/stack.yml"]
-  pull_request:
-    paths: ["docker-compose.yml", "fasterctl", ".env.example", "**/Dockerfile", ".github/workflows/stack.yml"]
-
-concurrency:
-  group: stack-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_call:
 
 jobs:
   demo:

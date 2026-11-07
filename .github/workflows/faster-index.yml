@@ -1,11 +1,7 @@
 name: faster-index
 
 on:
-  push:
-    branches: [main, dev]
-    paths: ["faster-index/**", ".github/workflows/faster-index.yml"]
-  pull_request:
-    paths: ["faster-index/**", ".github/workflows/faster-index.yml"]
+  workflow_call:
 
 jobs:
   test:

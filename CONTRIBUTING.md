@@ -16,9 +16,9 @@ benchmarks on other chains and code changes are all welcome.
 
 | Directory | Project | Toolchain |
 |---|---|---|
-| `faster/services/faster` | Explorer indexer and API | Rust, clang (RocksDB) |
-| `faster/services/frontend` | Explorer UI | Node.js 20+ |
-| `faster/services/clobarchiver` | CLOB archiver | Go |
+| `faster-explorer/services/faster` | Explorer indexer and API | Rust, clang (RocksDB) |
+| `faster-explorer/services/frontend` | Explorer UI | Node.js 20+ |
+| `faster-explorer/services/clobarchiver` | CLOB archiver | Go |
 | `faster-sync` | History API (+ `reth/`, `clients/`) | Rust, clang |
 | `faster-rpc` | JSON-RPC server | Rust |
 | `faster-index` | Indexing framework | Node.js 22.6+ |
@@ -27,7 +27,8 @@ Each project builds and tests on its own; run commands from its directory.
 
 ## Development checks
 
-These are the checks CI runs. Please run the ones for the projects you touch.
+These are the checks the release pipeline runs. CI does not run on every push
+or pull request, so please run the ones for the projects you touch.
 
 ```sh
 # faster-sync
@@ -44,8 +45,8 @@ cd faster-rpc && cargo fmt --check \
   && cargo test --locked --release
 
 # explorer
-cd faster/services/faster && cargo fmt --check && cargo test --locked
-cd faster/services/frontend && npm ci && npm run typecheck && npm run build
+cd faster-explorer/services/faster && cargo fmt --check && cargo test --locked
+cd faster-explorer/services/frontend && npm ci && npm run typecheck && npm run build
 
 # faster-index
 cd faster-index && npm ci && npm test
@@ -66,7 +67,8 @@ describe the existing method.
 - Keep each pull request to one change, with tests for new behaviour.
 - Update the component's README or docs when behaviour or settings change,
   and add an entry to its CHANGELOG.
-- CI must pass. Each component's workflow runs only when its directory changes.
+- Include the checks you ran in the pull request. Maintainers can also run
+  the full suite on a branch with Actions → checks → Run workflow.
 
 ## License
 

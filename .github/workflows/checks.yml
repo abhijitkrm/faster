@@ -1,0 +1,21 @@
+name: checks
+
+# Every project's checks plus the end-to-end stack test. Runs as part of each
+# release, or by hand: Actions → checks → Run workflow (or `gh workflow run checks`).
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  explorer:
+    uses: ./.github/workflows/faster-explorer.yml
+  sync:
+    uses: ./.github/workflows/faster-sync.yml
+  sync-reth:
+    uses: ./.github/workflows/faster-sync-reth.yml
+  rpc:
+    uses: ./.github/workflows/faster-rpc.yml
+  index:
+    uses: ./.github/workflows/faster-index.yml
+  stack:
+    uses: ./.github/workflows/stack.yml

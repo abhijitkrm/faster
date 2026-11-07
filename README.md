@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="faster/docs/assets/banner.png" alt="Faster: real-time EVM explorer and chain data stack" width="100%">
+  <img src="faster-explorer/docs/assets/banner.png" alt="Faster: real-time EVM explorer and chain data stack" width="100%">
 </p>
 
 <h1 align="center">Faster</h1>
@@ -10,11 +10,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/abhijitkrm/faster-mono/actions/workflows/stack.yml"><img src="https://github.com/abhijitkrm/faster-mono/actions/workflows/stack.yml/badge.svg" alt="stack"></a>
-  <a href="https://github.com/abhijitkrm/faster-mono/actions/workflows/faster-sync.yml"><img src="https://github.com/abhijitkrm/faster-mono/actions/workflows/faster-sync.yml/badge.svg" alt="faster-sync"></a>
-  <a href="https://github.com/abhijitkrm/faster-mono/actions/workflows/faster-rpc.yml"><img src="https://github.com/abhijitkrm/faster-mono/actions/workflows/faster-rpc.yml/badge.svg" alt="faster-rpc"></a>
-  <a href="https://github.com/abhijitkrm/faster-mono/actions/workflows/faster-index.yml"><img src="https://github.com/abhijitkrm/faster-mono/actions/workflows/faster-index.yml/badge.svg" alt="faster-index"></a>
-  <a href="https://github.com/abhijitkrm/faster-mono/actions/workflows/faster.yml"><img src="https://github.com/abhijitkrm/faster-mono/actions/workflows/faster.yml/badge.svg" alt="explorer"></a>
+  <a href="https://github.com/abhijitkrm/faster/releases/latest"><img src="https://img.shields.io/github/v/release/abhijitkrm/faster" alt="Latest release"></a>
+  <a href="https://github.com/abhijitkrm/faster/actions/workflows/release.yml"><img src="https://github.com/abhijitkrm/faster/actions/workflows/release.yml/badge.svg" alt="Release checks"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0"></a>
 </p>
 
@@ -48,7 +45,7 @@ Use the whole stack, or only the parts you need. Everything starts with one
 command.
 
 <p align="center">
-  <img src="faster/docs/assets/home.png" alt="Faster explorer home page: latest blocks, throughput and live transactions" width="90%">
+  <img src="faster-explorer/docs/assets/home.png" alt="Faster explorer home page: latest blocks, throughput and live transactions" width="90%">
 </p>
 
 ## Quick start
@@ -57,7 +54,7 @@ You need Docker with Compose v2. Nothing else: the demo profile brings its own
 synthetic chain.
 
 ```sh
-git clone https://github.com/abhijitkrm/faster-mono.git faster
+git clone https://github.com/abhijitkrm/faster.git
 cd faster
 ./fasterctl up demo
 ```
@@ -107,7 +104,7 @@ works too.
 
 | | Component | Language | What it does |
 |---|---|---|---|
-| 🔎 | [**Explorer**](faster) | Rust, TypeScript | Indexer, REST API and WebSocket feed in a single process over an embedded RocksDB store, with a React UI. Verified contracts, decoded calls and events, tokens and holders, internal transactions, reorg handling. |
+| 🔎 | [**Explorer**](faster-explorer) | Rust, TypeScript | Indexer, REST API and WebSocket feed in a single process over an embedded RocksDB store, with a React UI. Verified contracts, decoded calls and events, tokens and holders, internal transactions, reorg handling. |
 | ⚡ | [**faster-sync**](faster-sync) | Rust | Historical data API. Finalized history lives in immutable Parquet chunks with per-chunk filters; the unfinalized tip lives in RocksDB and rolls back on reorgs. Ingests over JSON-RPC, or in-process from reth through an [execution extension](faster-sync/reth). Clients for [Rust](faster-sync/clients/rust) and [TypeScript](faster-sync/clients/ts). |
 | 🔌 | [**faster-rpc**](faster-rpc) | Rust | Ethereum JSON-RPC served from faster-sync: blocks, transactions, receipts, `eth_getLogs` over any range, and WebSocket `newHeads`/`logs` subscriptions with reorg notifications. State calls and writes are forwarded to your node. |
 | 🧩 | [**faster-index**](faster-index) | TypeScript | Indexing framework: declare contracts and events in YAML, write handlers in TypeScript, get Postgres entities and a GraphQL API. Backfills from faster-sync, follows the head and rolls back on reorgs. |
@@ -170,8 +167,8 @@ documents.
 
 Sources: [faster-sync benchmark](faster-sync/docs/BENCHMARK.md) ·
 [faster-rpc conformance](faster-rpc/docs/CONFORMANCE.md) ·
-[explorer store](faster/docs/STORE.md) ·
-[storage engine comparison](faster/docs/STORAGE_BENCHMARK.md)
+[explorer store](faster-explorer/docs/STORE.md) ·
+[storage engine comparison](faster-explorer/docs/STORAGE_BENCHMARK.md)
 
 ## Installation
 
@@ -183,7 +180,7 @@ Container Registry; to use them instead of building:
 IMAGE_REGISTRY=ghcr.io/abhijitkrm IMAGE_TAG=<release tag> ./fasterctl up all
 ```
 
-**Binaries.** Tagged [releases](https://github.com/abhijitkrm/faster-mono/releases)
+**Binaries.** Tagged [releases](https://github.com/abhijitkrm/faster/releases)
 ships `faster`, `faster-sync`, `faster-rpc` and the `faster-index` CLI for
 Linux (x86_64, arm64) and macOS (arm64).
 
@@ -201,12 +198,12 @@ component's README.
 
 | Topic | Document |
 |---|---|
-| Explorer: setup, configuration, API | [faster/README.md](faster/README.md), [API](faster/docs/API.md), [deployment](faster/docs/DEPLOYMENT.md) |
+| Explorer: setup, configuration, API | [faster-explorer/README.md](faster-explorer/README.md), [API](faster-explorer/docs/API.md), [deployment](faster-explorer/docs/DEPLOYMENT.md) |
 | faster-sync: query API, Arrow streaming, clients | [faster-sync/README.md](faster-sync/README.md), [API](faster-sync/docs/API.md) |
 | faster-sync inside reth | [faster-sync/reth/README.md](faster-sync/reth/README.md) |
 | faster-rpc: supported methods, forwarding, limits | [faster-rpc/README.md](faster-rpc/README.md), [conformance](faster-rpc/docs/CONFORMANCE.md) |
 | faster-index: config, schema, handlers, GraphQL | [faster-index/README.md](faster-index/README.md), [example](faster-index/examples/erc20) |
-| CLOB order-book archive | [faster/docs/CLOB_ARCHIVE.md](faster/docs/CLOB_ARCHIVE.md) |
+| CLOB order-book archive | [faster-explorer/docs/CLOB_ARCHIVE.md](faster-explorer/docs/CLOB_ARCHIVE.md) |
 
 ## Project status
 
@@ -223,7 +220,7 @@ On the roadmap:
 - Dashboards, alerts and chunk backups to object storage
 - Trace methods in faster-rpc, multichain ordering in faster-index
 
-Ideas and feedback are welcome in [issues](https://github.com/abhijitkrm/faster-mono/issues).
+Ideas and feedback are welcome in [issues](https://github.com/abhijitkrm/faster/issues).
 
 ## Contributing
 

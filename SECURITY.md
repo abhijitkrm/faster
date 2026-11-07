@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Please report security issues privately through GitHub's
-[private vulnerability reporting](https://github.com/abhijitkrm/faster-mono/security/advisories/new)
+[private vulnerability reporting](https://github.com/abhijitkrm/faster/security/advisories/new)
 rather than in a public issue.
 
 Include the affected component and version, a description of the issue, and
