@@ -32,8 +32,8 @@ services:
   # ---- explorer ---------------------------------------------------------
   faster:
     profiles: [explorer, all]
-    build: ./faster/services/faster
-    image: ${IMAGE_REGISTRY:-faster}/faster:${IMAGE_TAG:-local}
+    build: ./faster-explorer/services/faster
+    image: ${IMAGE_REGISTRY:-faster}/faster-explorer:${IMAGE_TAG:-local}
     environment:
       RPC_URL: *node
       PORT: 3000
@@ -65,8 +65,8 @@ services:
 
   frontend:
     profiles: [explorer, all]
-    build: ./faster/services/frontend
-    image: ${IMAGE_REGISTRY:-faster}/frontend:${IMAGE_TAG:-local}
+    build: ./faster-explorer/services/frontend
+    image: ${IMAGE_REGISTRY:-faster}/faster-explorer-frontend:${IMAGE_TAG:-local}
     ports: ["${EXPLORER_PORT:-4000}:8080"]
     environment:
       FASTER_UPSTREAM: faster:3000
@@ -86,7 +86,7 @@ services:
     ports: ["127.0.0.1:8123:8123"]
     volumes:
       - clickhouse-data:/var/lib/clickhouse
-      - ./faster/database/clickhouse:/docker-entrypoint-initdb.d:ro
+      - ./faster-explorer/database/clickhouse:/docker-entrypoint-initdb.d:ro
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     healthcheck:
@@ -97,8 +97,8 @@ services:
 
   clobarchiver:
     profiles: [clob]
-    build: ./faster/services/clobarchiver
-    image: ${IMAGE_REGISTRY:-faster}/clobarchiver:${IMAGE_TAG:-local}
+    build: ./faster-explorer/services/clobarchiver
+    image: ${IMAGE_REGISTRY:-faster}/faster-clobarchiver:${IMAGE_TAG:-local}
     environment:
       NODE_RPC: ${CLOB_NODE_RPC:-http://host.docker.internal:8545}
       CLICKHOUSE_ADDR: clickhouse:9000

@@ -4,9 +4,7 @@ Indexing framework for EVM applications: describe the contracts and events
 you care about, write handlers that turn them into your own entities, and get
 a GraphQL API that stays in sync with the chain, including reorgs.
 
-Part of the Faster stack: [faster](https://github.com/abhijitkrm/faster) (explorer) ·
-[faster-sync](https://github.com/abhijitkrm/faster-sync) ·
-[faster-rpc](https://github.com/abhijitkrm/faster-rpc) · faster-index.
+Part of [Faster](https://github.com/abhijitkrm/faster): [explorer](../faster-explorer) · [faster-sync](../faster-sync) · [faster-rpc](../faster-rpc) · faster-index.
 Clean-room: its own design and code; other indexing frameworks were a
 behavioural reference only.
 

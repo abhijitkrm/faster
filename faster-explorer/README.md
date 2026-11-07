@@ -1,6 +1,8 @@
 <p align="center"><img src="docs/assets/banner.png" alt="faster — real-time EVM block explorer, indexed in milliseconds, served from memory" width="100%"></p>
 
-# Faster — real-time EVM block explorer
+# Faster explorer — real-time EVM block explorer
+
+Part of [Faster](https://github.com/abhijitkrm/faster): explorer · [faster-sync](../faster-sync) · [faster-rpc](../faster-rpc) · [faster-index](../faster-index).
 
 Faster indexes any EVM chain over JSON-RPC and serves a live explorer UI. The
 explorer path is one Rust process (`services/faster`) with an embedded RocksDB

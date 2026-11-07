@@ -1,11 +1,7 @@
 name: faster-sync reth ExEx
 
 on:
-  push:
-    branches: [main, dev, "dev-*"]
-    paths: ["faster-sync/reth/**", "faster-sync/src/**", "faster-sync/Cargo.toml", ".github/workflows/faster-sync-reth.yml"]
-  pull_request:
-    paths: ["faster-sync/reth/**", "faster-sync/src/**", "faster-sync/Cargo.toml", ".github/workflows/faster-sync-reth.yml"]
+  workflow_call:
 
 jobs:
   build:

@@ -1,7 +1,9 @@
 name: release
 
-# Tag vX.Y.Z on main: builds the stack's binaries for Linux and macOS, attaches
-# them to the GitHub release, and pushes the images to ghcr.io/<owner>/<name>:<tag>.
+# Tag vX.Y.Z on main: runs every check (checks.yml), then builds the stack's
+# binaries for Linux and macOS, attaches them to the GitHub release, and pushes
+# the images to ghcr.io/<owner>/<name>:<tag>. Nothing is published unless all
+# checks pass. This is the only workflow that runs automatically.
 on:
   push:
     tags: ["v*"]
@@ -10,8 +12,15 @@ permissions:
   contents: write
   packages: write
 
+concurrency:
+  group: release-${{ github.ref }}
+
 jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+
   binaries:
+    needs: checks
     strategy:
       fail-fast: false
       matrix:
@@ -41,14 +50,15 @@ jobs:
           path: dist/*.tar.gz
 
   images:
+    needs: checks
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: faster, context: faster/services/faster }
-          - { name: frontend, context: faster/services/frontend }
-          - { name: clobarchiver, context: faster/services/clobarchiver }
+          - { name: faster-explorer, context: faster-explorer/services/faster }
+          - { name: faster-explorer-frontend, context: faster-explorer/services/frontend }
+          - { name: faster-clobarchiver, context: faster-explorer/services/clobarchiver }
           - { name: faster-sync, context: faster-sync }
           - { name: faster-rpc, context: faster-rpc }
           - { name: faster-index, context: faster-index }

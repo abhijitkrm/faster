@@ -1,15 +1,7 @@
 name: faster-rpc
 
 on:
-  push:
-    branches: [main, dev]
-    paths: ["faster-rpc/**", ".github/workflows/faster-rpc.yml"]
-  pull_request:
-    paths: ["faster-rpc/**", ".github/workflows/faster-rpc.yml"]
-
-concurrency:
-  group: faster-rpc-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_call:
 
 jobs:
   rust:

@@ -89,7 +89,7 @@ status() {
 build() {
   local out; out=$(mkdir -p "${1:-bin}" && cd "${1:-bin}" && pwd)
   echo "building into $out"
-  (cd faster/services/faster && cargo build --release --locked && cp target/release/faster "$out/")
+  (cd faster-explorer/services/faster && cargo build --release --locked && cp target/release/faster "$out/")
   (cd faster-sync && cargo build --release --locked --bin faster-sync --bin fakechain \
     && cp target/release/faster-sync target/release/fakechain "$out/")
   (cd faster-rpc && cargo build --release --locked --bin faster-rpc && cp target/release/faster-rpc "$out/")

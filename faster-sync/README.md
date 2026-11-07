@@ -5,9 +5,7 @@ transactions, receipts, logs and call traces you need across any block range
 and get them back in pages, as JSON or Arrow. Built so an indexer catches up
 on months of history in seconds instead of millions of `eth_getLogs` calls.
 
-Part of the Faster stack: [faster](https://github.com/abhijitkrm/faster) (explorer) ·
-faster-sync · [faster-rpc](https://github.com/abhijitkrm/faster-rpc) ·
-[faster-index](https://github.com/abhijitkrm/faster-index). Clean-room
+Part of [Faster](https://github.com/abhijitkrm/faster): [explorer](../faster-explorer) · faster-sync · [faster-rpc](../faster-rpc) · [faster-index](../faster-index). Clean-room
 implementation.
 
 | | faster-sync | ClickHouse (best layout) |

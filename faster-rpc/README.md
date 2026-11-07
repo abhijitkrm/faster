@@ -6,9 +6,7 @@ and log methods, answered from pre-built indexes, with `eth_getLogs` over
 long ranges at index speed. State methods (`eth_call`, `eth_getBalance`, …)
 and writes go to an upstream node.
 
-Part of the Faster stack: [faster](https://github.com/abhijitkrm/faster) (explorer) ·
-[faster-sync](https://github.com/abhijitkrm/faster-sync) · faster-rpc ·
-[faster-index](https://github.com/abhijitkrm/faster-index). Clean-room implementation.
+Part of [Faster](https://github.com/abhijitkrm/faster): [explorer](../faster-explorer) · [faster-sync](../faster-sync) · faster-rpc · [faster-index](../faster-index). Clean-room implementation.
 
 ## What it serves
 

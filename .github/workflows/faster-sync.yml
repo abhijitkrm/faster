@@ -1,15 +1,7 @@
 name: faster-sync
 
 on:
-  push:
-    branches: [main, dev]
-    paths: ["faster-sync/**", ".github/workflows/faster-sync.yml"]
-  pull_request:
-    paths: ["faster-sync/**", ".github/workflows/faster-sync.yml"]
-
-concurrency:
-  group: faster-sync-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_call:
 
 jobs:
   rust:
